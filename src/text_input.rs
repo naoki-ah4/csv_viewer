@@ -38,10 +38,10 @@ actions!(
     ]
 );
 
-/// キー操作の登録。入力欄にフォーカスがあるときだけ効く（`TextInput` コンテキスト）。
-pub fn bind_keys(cx: &mut App) {
+/// 入力欄のキー割り当て。入力欄にフォーカスがあるときだけ効く（`TextInput` コンテキスト）。
+pub fn key_bindings() -> Vec<KeyBinding> {
     let ctx = Some("TextInput");
-    cx.bind_keys([
+    vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
@@ -58,7 +58,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Confirm, ctx),
         KeyBinding::new("shift-enter", ConfirmBackward, ctx),
         KeyBinding::new("escape", Cancel, ctx),
-    ]);
+    ]
 }
 
 /// 入力欄から外へ通知するイベント。

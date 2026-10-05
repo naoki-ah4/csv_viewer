@@ -10,6 +10,7 @@ mod reveal;
 mod scroll_pos;
 mod scrollbar;
 mod search;
+mod selection;
 mod table;
 mod text_input;
 
@@ -21,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
+    App, Application, Bounds, ClipboardItem, Context, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
     Entity, Rgba, ScrollWheelEvent, Subscription, Task, Window, WindowBounds, WindowOptions, actions, canvas, div, point,
     prelude::*, px, rgb, rgba, size,
@@ -32,6 +33,7 @@ use goto::{GotoInput, GotoKey};
 use matcher::{Direction, Matcher, Outcome};
 use scroll_pos::{Nav, ScrollPos};
 use search::Match;
+use selection::{CellPos, Selection};
 use scrollbar::{Axis, AxisState};
 use table::Table;
 use text_input::{TextInput, TextInputEvent};
@@ -46,6 +48,8 @@ actions!(
         FindInTable,
         FindNext,
         FindPrevious,
+        CopySelection,
+        SelectAllCells,
         ScrollLineUp,
         ScrollLineDown,
         ScrollPageUp,
@@ -180,6 +184,10 @@ struct Viewer {
     goto: Option<GotoInput>,
     /// クリックしたセルの全文を出すポップアップ。
     popup: Option<CellPopup>,
+    /// 選択範囲。
+    selection: Option<Selection>,
+    /// マウスのボタンを押して、選択範囲を広げているところ。
+    selecting: bool,
     /// 検索バーの入力欄。最初に開いたときに作る。
     search_input: Option<Entity<TextInput>>,
     search_subscription: Option<Subscription>,
@@ -224,6 +232,8 @@ impl Viewer {
             loading: None,
             goto: None,
             popup: None,
+            selection: None,
+            selecting: false,
             search_input: None,
             search_subscription: None,
             search_open: false,
@@ -309,6 +319,8 @@ impl Viewer {
                 self.encoding_menu = None;
                 self.clear_search();
                 self.search_open = false;
+                self.selection = None;
+                self.selecting = false;
                 self.notice = None;
                 self.path = Some(path.to_path_buf());
                 self.forced_encoding = forced;
@@ -505,6 +517,191 @@ impl Viewer {
             total_chars,
         });
         cx.notify();
+    }
+
+    /// 本体のセルを押した。クリックで選択、`Shift+クリック`で範囲を広げる、ダブルクリックで全文を出す。
+    fn press_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        // 全体のクリックで閉じる処理（ルート要素）には、渡さない。
+        cx.stop_propagation();
+        self.popup = None;
+        self.encoding_menu = None;
+        self.notice = None;
+        let pos = CellPos { row, col };
+        if event.click_count >= 2 {
+            self.selection = Some(Selection::cell(pos));
+            self.open_cell_popup(Some(row), col, event.position, cx);
+            return;
+        }
+        self.selecting = true;
+        self.selection = Some(match (event.modifiers.shift, self.selection) {
+            (true, Some(current)) => current.extended_to(pos),
+            _ => Selection::cell(pos),
+        });
+        cx.notify();
+    }
+
+    /// ボタンを押したまま、セルの上を通った。選択範囲を広げる。
+    fn drag_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        let Some(current) = self.selection else {
+            return;
+        };
+        let extended = current.extended_to(CellPos { row, col });
+        if extended != current {
+            self.selection = Some(extended);
+            cx.notify();
+        }
+    }
+
+    /// 行番号を押した。その行全体を選ぶ。`Shift+クリック`で、行の範囲を広げる。
+    fn press_row_number(&mut self, row: usize, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.popup = None;
+        self.encoding_menu = None;
+        self.notice = None;
+        self.selecting = true;
+        self.selection = Some(match (event.modifiers.shift, self.selection) {
+            (true, Some(current)) => current.extended_to(CellPos { row, col: 0 }),
+            _ => Selection::whole_row(row),
+        });
+        cx.notify();
+    }
+
+    fn select_all_cells(&mut self, cx: &mut Context<Self>) {
+        let rows = self.row_count();
+        self.selection = Selection::all_rows(rows);
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// 選択範囲を、タブ区切りでコピーする。ポップアップが開いているときは、そのセルの全文を
+    /// コピーする（ポップアップに出ている、切り詰めた文字列ではなく）。
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(loaded) = self.loaded.as_ref() else {
+            return;
+        };
+        if let Some(popup) = self.popup.as_ref() {
+            let text = match popup.row {
+                Some(row) => loaded.table.cell(row, popup.col),
+                None => loaded.table.header(popup.col),
+            }
+            .into_owned();
+            let chars = text.chars().count();
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.notice = Some(format!("セルの全文をコピーしました（{chars} 文字）"));
+            cx.notify();
+            return;
+        }
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let columns = loaded.table.column_count();
+        let cells = selection.cell_count(columns);
+        if cells > selection::COPY_CAP_CELLS {
+            self.notice = Some(format!(
+                "選択が大きすぎて、コピーできません（{cells} セル。上限は {} セル）",
+                selection::COPY_CAP_CELLS
+            ));
+            cx.notify();
+            return;
+        }
+        let text = selection::to_tsv(selection.rows(), selection.cols(columns), |row, col| {
+            loaded.table.cell(row, col)
+        });
+        let (rows, cols) = selection.dimensions(columns);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.notice = Some(format!("{rows} 行 × {cols} 列をコピーしました"));
+        cx.notify();
+    }
+
+    /// `Enter`：選択している（現在位置の）セルの全文を、ポップアップで出す。
+    fn open_popup_for_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let head = selection.head();
+        // 見えない位置にあるなら、見える位置までスクロールする。
+        self.reveal(Match {
+            row: head.row,
+            col: head.col,
+        });
+        let Some(anchor) = self.cell_anchor(head.row, head.col) else {
+            return;
+        };
+        self.popup = None;
+        self.open_cell_popup(Some(head.row), head.col, anchor, cx);
+    }
+
+    /// 画面に見えているセルの中心の位置（ウィンドウ座標）。ポップアップを出す位置に使う。
+    fn cell_anchor(&self, row: usize, col: usize) -> Option<Point<Pixels>> {
+        let loaded = self.loaded.as_ref()?;
+        let bounds = self.viewport.get();
+        let viewport_height = match f32::from(bounds.size.height) {
+            h if h > 0.0 => h,
+            _ => DEFAULT_VIEWPORT_HEIGHT,
+        };
+        let visible = visible_rows(self.scroll, viewport_height, loaded.table.row_count());
+        if row < visible.first || row >= visible.last {
+            return None;
+        }
+        let widths = &loaded.col_widths;
+        let left: f32 = widths.iter().take(col).sum();
+        let width = widths.get(col).copied().unwrap_or(0.0);
+        // 行を描く領域の左端は、横スクロールのぶん、ずれた位置にあるので、そのまま足してよい。
+        let x = bounds.origin.x + px(left + width / 2.0);
+        let y = bounds.origin.y
+            + px((row - visible.first) as f32 * ROW_HEIGHT - visible.offset + ROW_HEIGHT / 2.0);
+        Some(point(x, y))
+    }
+
+    fn cell_press(
+        cx: &Context<Self>,
+        row: usize,
+        col: usize,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            this.press_cell(row, col, event, cx)
+        })
+    }
+
+    fn cell_drag(
+        cx: &Context<Self>,
+        row: usize,
+        col: usize,
+    ) -> impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            if event.dragging() {
+                this.drag_cell(row, col, cx);
+            }
+        })
+    }
+
+    fn row_number_press(
+        cx: &Context<Self>,
+        row: usize,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            this.press_row_number(row, event, cx)
+        })
+    }
+
+    fn row_number_drag(
+        cx: &Context<Self>,
+        row: usize,
+    ) -> impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            if event.dragging() {
+                this.drag_cell(row, 0, cx);
+            }
+        })
     }
 
     /// セルのクリックを `open_cell_popup` へつなぐリスナー。
@@ -864,13 +1061,28 @@ impl Viewer {
     /// 入力欄が開いているときのキー入力を処理する。
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(input) = self.goto.as_mut() else {
-            if (self.popup.is_some() || self.encoding_menu.is_some())
-                && event.keystroke.key == "escape"
-            {
-                self.popup = None;
-                self.encoding_menu = None;
-                cx.stop_propagation();
-                cx.notify();
+            let modifiers = &event.keystroke.modifiers;
+            let plain = !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.shift);
+            match event.keystroke.key.as_str() {
+                // `Esc`：開いているものを閉じる。何も開いていなければ、選択を解く。
+                "escape" => {
+                    if self.popup.is_some() || self.encoding_menu.is_some() {
+                        self.popup = None;
+                        self.encoding_menu = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    } else if self.selection.is_some() {
+                        self.selection = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }
+                // `Enter`：選択しているセルの全文を、ポップアップで出す。
+                "enter" if plain && self.popup.is_none() && self.selection.is_some() => {
+                    self.open_popup_for_selection(cx);
+                    cx.stop_propagation();
+                }
+                _ => {}
             }
             return;
         };
@@ -1025,6 +1237,8 @@ impl Viewer {
         // 検索の一致を、画面に見えているセルだけ、強調する。
         let search_matcher = self.search_state.as_ref().map(|s| &s.matcher);
         let search_current = self.search_state.as_ref().and_then(|s| s.current);
+        let selection = self.selection;
+        let column_count = loaded.table.column_count();
         let header = div()
             .flex()
             .flex_row()
@@ -1074,8 +1288,8 @@ impl Viewer {
                 .when(ix % 2 == 1, |d| d.bg(rgb(0xfafafa)))
                 .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
                     let text = loaded.table.cell(ix, i).to_string();
-                    // 強調の優先順位：ポップアップを出しているセル、検索の現在の一致、検索の一致。
-                    let background = if popup_cell == Some((Some(ix), i)) {
+                    // 強調の優先順位：選択範囲、検索の現在の一致、検索の一致。
+                    let background = if selection.is_some_and(|s| s.contains(ix, i, column_count)) {
                         Some(SELECTED_CELL_BG)
                     } else if search_current == Some(Match { row: ix, col: i }) {
                         Some(SEARCH_CURRENT_BG)
@@ -1086,7 +1300,8 @@ impl Viewer {
                     };
                     cell(text, *w)
                         .when_some(background, |d, bg| d.bg(bg))
-                        .on_mouse_down(MouseButton::Left, Self::cell_click(cx, Some(ix), i))
+                        .on_mouse_down(MouseButton::Left, Self::cell_press(cx, ix, i))
+                        .on_mouse_move(Self::cell_drag(cx, ix, i))
                 }))
         });
         // 左端の行番号の欄。横にスクロールしても動かない。行の位置は、本体と同じ計算で揃える。
@@ -1100,7 +1315,13 @@ impl Viewer {
                 .h(px(ROW_HEIGHT))
                 .px_2()
                 .text_color(rgb(0x888888))
-                .bg(rgb(if ix % 2 == 1 { 0xf0f0f0 } else { 0xf6f6f6 }))
+                .bg(if selection.is_some_and(|s| s.rows().contains(&ix)) {
+                    rgb(0xd6e6fb)
+                } else {
+                    rgb(if ix % 2 == 1 { 0xf0f0f0 } else { 0xf6f6f6 })
+                })
+                .on_mouse_down(MouseButton::Left, Self::row_number_press(cx, ix))
+                .on_mouse_move(Self::row_number_drag(cx, ix))
                 .child((ix + 1).to_string())
         });
         let gutter = div()
@@ -1456,6 +1677,13 @@ impl Viewer {
                     l.table.column_count(),
                 );
                 let label = encodings::status_label(l.table.encoding(), self.forced_encoding);
+                let selected = self
+                    .selection
+                    .filter(|s| !s.is_single_cell(l.table.column_count()))
+                    .map(|s| {
+                        let (rows, cols) = s.dimensions(l.table.column_count());
+                        format!(" / 選択 {rows} 行 × {cols} 列")
+                    });
                 bar.child(head)
                     .child(
                         div()
@@ -1475,6 +1703,7 @@ impl Viewer {
                             .child(label),
                     )
                     .children(percent.map(|p| format!(" / 索引作成中 {p}%")))
+                    .children(selected)
             }
             (None, None, None) => bar,
         }
@@ -1610,12 +1839,15 @@ impl Render for Viewer {
             .bg(rgb(0xffffff))
             .text_color(rgb(0x222222))
             .text_sm()
+            .key_context(TABLE_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 this.handle_key_down(event, cx)
             }))
             .on_action(cx.listener(|this, _: &GotoRow, _, cx| this.open_goto(cx)))
             .on_action(cx.listener(|this, _: &FindInTable, window, cx| this.open_search(window, cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all_cells(cx)))
             .on_action(cx.listener(|this, _: &FindNext, window, cx| {
                 if this.search_state.is_some() {
                     this.search_step(Direction::Forward, window, cx);
@@ -1664,6 +1896,7 @@ impl Render for Viewer {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.drag = None;
+                    this.selecting = false;
                     cx.notify();
                 }),
             )
@@ -1671,6 +1904,7 @@ impl Render for Viewer {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.drag = None;
+                    this.selecting = false;
                     cx.notify();
                 }),
             )
@@ -1738,13 +1972,19 @@ fn main() {
     });
 }
 
-/// 終了まわりの設定。GPUIは最後のウィンドウが閉じてもアプリを終了しないため、自前で扱う。
-fn setup_app(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
-    // CloseWindow / OpenFile はウィンドウ側（Viewer のルート要素）で受ける。
-    // アクション処理中は当該ウィンドウが取り出されており、ここから window.update() はできない。
-    text_input::bind_keys(cx);
-    cx.bind_keys([
+/// 表のキー割り当てに付けるコンテキスト。ルートの要素にも、同じ名前を付ける。
+///
+/// コンテキストのないキー割り当ては、「いちばん深い位置にある」ものとして扱われ、同じ深さなら、
+/// あとで登録したものが勝つ。入力欄（`TextInput`）と同じキーを、コンテキストなしで割り当てると、
+/// 入力欄にフォーカスがあっても、そちらが勝ってしまう。入力欄は、このコンテキストの内側にあるので、
+/// 表のキー割り当てに `Table` を付けておけば、入力欄のほうが深く、登録の順序に関わらず、優先される。
+const TABLE_CONTEXT: &str = "Table";
+
+/// アプリのキー割り当て。
+fn app_key_bindings() -> Vec<KeyBinding> {
+    let table = Some(TABLE_CONTEXT);
+    vec![
+        // アプリ全体
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-o", OpenFile, None),
@@ -1752,15 +1992,27 @@ fn setup_app(cx: &mut App) {
         KeyBinding::new("cmd-f", FindInTable, None),
         KeyBinding::new("cmd-g", FindNext, None),
         KeyBinding::new("cmd-shift-g", FindPrevious, None),
-        KeyBinding::new("up", ScrollLineUp, None),
-        KeyBinding::new("down", ScrollLineDown, None),
-        KeyBinding::new("pageup", ScrollPageUp, None),
-        KeyBinding::new("pagedown", ScrollPageDown, None),
-        KeyBinding::new("home", ScrollToTop, None),
-        KeyBinding::new("end", ScrollToBottom, None),
-        KeyBinding::new("cmd-up", ScrollToTop, None),
-        KeyBinding::new("cmd-down", ScrollToBottom, None),
-    ]);
+        // 表。入力欄の同じキー（Cmd+C、Cmd+A、Home、End）に、負けるようにする。
+        KeyBinding::new("cmd-c", CopySelection, table),
+        KeyBinding::new("cmd-a", SelectAllCells, table),
+        KeyBinding::new("up", ScrollLineUp, table),
+        KeyBinding::new("down", ScrollLineDown, table),
+        KeyBinding::new("pageup", ScrollPageUp, table),
+        KeyBinding::new("pagedown", ScrollPageDown, table),
+        KeyBinding::new("home", ScrollToTop, table),
+        KeyBinding::new("end", ScrollToBottom, table),
+        KeyBinding::new("cmd-up", ScrollToTop, table),
+        KeyBinding::new("cmd-down", ScrollToBottom, table),
+    ]
+}
+
+/// 終了まわりの設定。GPUIは最後のウィンドウが閉じてもアプリを終了しないため、自前で扱う。
+fn setup_app(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    // CloseWindow / OpenFile はウィンドウ側（Viewer のルート要素）で受ける。
+    // アクション処理中は当該ウィンドウが取り出されており、ここから window.update() はできない。
+    cx.bind_keys(text_input::key_bindings());
+    cx.bind_keys(app_key_bindings());
     cx.set_menus(vec![
         Menu {
             name: "csv_viewer".into(),
@@ -1961,6 +2213,108 @@ mod tests {
         assert_eq!(
             search_info_text(false, None, false, Some(41)),
             "数えています… / 現在 42 行目"
+        );
+    }
+
+    // ---- キー割り当ての優先順位 ----
+
+    use gpui::{KeyContext, Keymap, Keystroke};
+
+    /// 本物のアプリと同じ一覧で、キーマップを作る。`text_first` は、入力欄の割り当てを、
+    /// 先に登録するか（本物の登録順）、あとに登録するか。
+    fn keymap(text_first: bool) -> Keymap {
+        let mut keymap = Keymap::default();
+        if text_first {
+            keymap.add_bindings(text_input::key_bindings());
+            keymap.add_bindings(app_key_bindings());
+        } else {
+            keymap.add_bindings(app_key_bindings());
+            keymap.add_bindings(text_input::key_bindings());
+        }
+        keymap
+    }
+
+    /// そのキーを押したとき、最優先で動く割り当ての、動作の名前。
+    fn top_action(keymap: &Keymap, key: &[Keystroke], contexts: &[&str]) -> Option<String> {
+        let stack: Vec<KeyContext> = contexts
+            .iter()
+            .map(|c| KeyContext::parse(c).unwrap())
+            .collect();
+        let (bindings, _) = keymap.bindings_for_input(key, &stack);
+        bindings.first().map(|b| b.action().name().to_string())
+    }
+
+    #[test]
+    fn every_key_of_the_text_input_wins_while_it_has_focus() {
+        for text_first in [true, false] {
+            let keymap = keymap(text_first);
+            for binding in text_input::key_bindings() {
+                let keystrokes: Vec<Keystroke> = binding
+                    .keystrokes()
+                    .iter()
+                    .map(|k| k.inner().clone())
+                    .collect();
+                let action = top_action(&keymap, &keystrokes, &[TABLE_CONTEXT, "TextInput"]);
+                assert_eq!(
+                    action.as_deref(),
+                    Some(binding.action().name()),
+                    "{keystrokes:?} (text input registered first: {text_first})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_table_keys_work_when_the_table_has_focus() {
+        for text_first in [true, false] {
+            let keymap = keymap(text_first);
+            let key = |s: &str| [Keystroke::parse(s).unwrap()];
+            for (keystroke, expected) in [
+                ("cmd-c", "csv_viewer::CopySelection"),
+                ("cmd-a", "csv_viewer::SelectAllCells"),
+                ("home", "csv_viewer::ScrollToTop"),
+                ("end", "csv_viewer::ScrollToBottom"),
+                ("up", "csv_viewer::ScrollLineUp"),
+                ("pagedown", "csv_viewer::ScrollPageDown"),
+            ] {
+                assert_eq!(
+                    top_action(&keymap, &key(keystroke), &[TABLE_CONTEXT]).as_deref(),
+                    Some(expected),
+                    "{keystroke}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keys_the_text_input_does_not_use_still_reach_the_table_and_the_app() {
+        let keymap = keymap(true);
+        let key = |s: &str| [Keystroke::parse(s).unwrap()];
+        let stack = [TABLE_CONTEXT, "TextInput"];
+        // 入力欄が使わない、表のキー（上下、ページ送り）は、入力中でも表に効く。
+        assert_eq!(
+            top_action(&keymap, &key("pagedown"), &stack).as_deref(),
+            Some("csv_viewer::ScrollPageDown")
+        );
+        // アプリ全体のキーも、入力中に効く。
+        assert_eq!(top_action(&keymap, &key("cmd-q"), &stack).as_deref(), Some("csv_viewer::Quit"));
+        assert_eq!(top_action(&keymap, &key("cmd-g"), &stack).as_deref(), Some("csv_viewer::FindNext"));
+    }
+
+    #[test]
+    fn the_old_global_bindings_would_have_beaten_the_text_input() {
+        // 不具合の再現：コンテキストなしで、あとから登録すると、入力欄の `Cmd+C` に勝ってしまう。
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(text_input::key_bindings());
+        keymap.add_bindings([KeyBinding::new("cmd-c", CopySelection, None)]);
+        assert_eq!(
+            top_action(
+                &keymap,
+                &[Keystroke::parse("cmd-c").unwrap()],
+                &[TABLE_CONTEXT, "TextInput"]
+            )
+            .as_deref(),
+            Some("csv_viewer::CopySelection")
         );
     }
 }
