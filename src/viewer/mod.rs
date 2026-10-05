@@ -29,6 +29,7 @@ use crate::scroll_pos::{Nav, ROW_HEIGHT, ScrollPos};
 use crate::scrollbar::{Axis, AxisState};
 use crate::search::{Match, Rank};
 use crate::selection::{CellPos, Selection, Step};
+use crate::settings::ViewSettings;
 use crate::table::Table;
 use crate::table::lazy::{IndexJob, IndexStatus};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -168,26 +169,6 @@ impl Loaded {
     }
 }
 
-/// 表示の設定。すべてのウィンドウで共通。
-#[derive(Clone, Copy)]
-pub(crate) struct ViewSettings {
-    /// 左端の行番号の欄を出すか。
-    pub(crate) show_row_numbers: bool,
-    /// 上端の列番号の行を出すか。
-    pub(crate) show_col_numbers: bool,
-}
-
-impl gpui::Global for ViewSettings {}
-
-impl Default for ViewSettings {
-    fn default() -> Self {
-        Self {
-            show_row_numbers: true,
-            show_col_numbers: true,
-        }
-    }
-}
-
 pub(crate) struct Viewer {
     /// 表示の設定。描画のたびに、全ウィンドウ共通の `ViewSettings` から写す。
     settings: ViewSettings,
@@ -313,6 +294,7 @@ impl Viewer {
         let mut settings = cx.try_global::<ViewSettings>().copied().unwrap_or_default();
         change(&mut settings);
         cx.set_global(settings);
+        settings.save();
         cx.refresh_windows();
     }
 

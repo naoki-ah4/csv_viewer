@@ -4,7 +4,7 @@
 #   scripts/bundle.sh           # target/bundle/CSV Viewer.app を作る
 #   open "target/bundle/CSV Viewer.app" --args samples/utf8.csv
 #
-# 識別子は仮のもの。アイコンは assets/icon.icns（作り方は scripts/make_icon.sh）。ad-hoc 署名（`-`）なので、手元で使う分には動くが、
+# アイコンは assets/icon.icns（作り方は scripts/make_icon.sh）。ad-hoc 署名（`-`）なので、手元で使う分には動くが、
 # 配布用の署名や公証（notarization）はしていない。
 #
 # Finder の「このアプリケーションで開く」に .csv で出てくるようにするには、
@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 APP_NAME="CSV Viewer"
-BUNDLE_ID="local.csv-viewer"
+BUNDLE_ID="net.naoki-workspace.csv-viewer" # src/settings.rs の APP_ID と同じにする
 BIN_NAME="csv_viewer"
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 

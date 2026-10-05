@@ -10,6 +10,7 @@ mod scroll_pos;
 mod scrollbar;
 mod search;
 mod selection;
+mod settings;
 mod table;
 mod text_input;
 mod text_select;
@@ -66,7 +67,7 @@ fn main() {
 /// 終了まわりの設定。GPUIは最後のウィンドウが閉じてもアプリを終了しないため、自前で扱う。
 fn setup_app(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.set_global(viewer::ViewSettings::default());
+    cx.set_global(settings::ViewSettings::load());
     // CloseWindow / OpenFile はウィンドウ側（Viewer のルート要素）で受ける。
     // アクション処理中は当該ウィンドウが取り出されており、ここから window.update() はできない。
     cx.bind_keys(text_input::key_bindings());
