@@ -6,9 +6,6 @@ use encoding_rs::Encoding;
 
 /// 文字コード判定に `chardetng` へ渡す最大バイト数。全体を見ると大きいファイルで数百msかかる。
 const DETECT_WINDOW: usize = 64 * 1024;
-/// 最初の非ASCIIバイトを探す範囲の上限。HDDでも体感に出ない量（シーケンシャル読みで約10ms）に留める。
-/// 全読み込みとmmapで同じ判定結果になるよう、読み込み方式に関わらずこの範囲だけを見る。
-const DETECT_SCAN_LIMIT: usize = 1024 * 1024;
 const ESC: u8 = 0x1B;
 
 /// デコード済みのCSVを、セル文字列を1本に連結した形で保持する。
@@ -36,7 +33,18 @@ impl CsvTable {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        let (encoding, body) = detect_encoding(bytes);
+        Self::from_bytes_as(bytes, None)
+    }
+
+    /// `forced` を指定すると、文字コードの自動判定をせずその文字コードで読む（手動切り替え用）。
+    pub fn from_bytes_as(
+        bytes: &[u8],
+        forced: Option<&'static Encoding>,
+    ) -> anyhow::Result<Self> {
+        let (encoding, body) = match forced {
+            Some(encoding) => (encoding, strip_bom(bytes, encoding)),
+            None => detect_encoding(bytes),
+        };
         // UTF-8 として正しければ借用のまま（コピーしない）。
         let (decoded, _) = encoding.decode_without_bom_handling(body);
 
@@ -118,22 +126,40 @@ impl CsvTable {
     }
 }
 
+/// `encoding` と同じ文字コードのBOMが先頭にあれば取り除く。
+fn strip_bom<'a>(bytes: &'a [u8], encoding: &'static Encoding) -> &'a [u8] {
+    match Encoding::for_bom(bytes) {
+        Some((bom_encoding, bom_len)) if bom_encoding == encoding => &bytes[bom_len..],
+        _ => bytes,
+    }
+}
+
 /// BOMがあればそれを優先し、なければ chardetng で推定する。BOMは本文から取り除く。
 fn detect_encoding(bytes: &[u8]) -> (&'static Encoding, &[u8]) {
     if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
         return (encoding, &bytes[bom_len..]);
     }
-    // 判定に効くのは非ASCIIの部分だけなので、最初の非ASCIIバイトから一定量だけ見る。
-    // ISO-2022-JP は7bitのみでESCで文字集合を切り替えるため、ESCも目印にする。
-    // 探す範囲には上限があり、その範囲に見つからなければASCII互換（UTF-8）とみなす。
-    let scan = &bytes[..bytes.len().min(DETECT_SCAN_LIMIT)];
-    let Some(start) = scan.iter().position(|&b| b >= 0x80 || b == ESC) else {
-        return (encoding_rs::UTF_8, bytes);
-    };
+    match find_first_non_ascii(bytes) {
+        None => (encoding_rs::UTF_8, bytes),
+        Some(start) => (classify_from(bytes, start), bytes),
+    }
+}
+
+/// 文字コードの判断材料になる最初のバイトの位置。
+///
+/// 判定に効くのは非ASCIIの部分だけで、ASCIIだけの区間はどの文字コードでも同じに読める。
+/// ISO-2022-JP は7bitのみでESCにより文字集合を切り替えるため、ESCも目印にする。
+/// 見つからなければ全体がASCII（UTF-8として読んでよい）。
+pub fn find_first_non_ascii(bytes: &[u8]) -> Option<usize> {
+    bytes.iter().position(|&b| b >= 0x80 || b == ESC)
+}
+
+/// `start`（`find_first_non_ascii` の結果）から最大 `DETECT_WINDOW` バイトを見て推定する。
+pub fn classify_from(bytes: &[u8], start: usize) -> &'static Encoding {
     let end = (start + DETECT_WINDOW).min(bytes.len());
     let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
     detector.feed(&bytes[start..end], end == bytes.len());
-    (detector.guess(None, Utf8Detection::Allow), bytes)
+    detector.guess(None, Utf8Detection::Allow)
 }
 
 #[cfg(test)]
@@ -313,34 +339,49 @@ mod tests {
     }
 
     #[test]
-    fn gives_up_after_scan_limit_and_assumes_utf8() {
-        // 上限までASCIIだけのファイルは、その先に日本語があってもUTF-8とみなす（既知の制約）。
-        // HDDでも重くならない範囲で打ち切る設計上の割り切りで、文字コードは手動で切り替える想定。
+    fn detects_shift_jis_after_very_long_ascii_prefix() {
+        // 先頭に何MBもASCIIだけが続いても、その先の日本語を取りこぼさない。
         let mut text = String::from("id,name\n");
         let mut i = 0;
-        while text.len() < DETECT_SCAN_LIMIT + 1024 {
+        while text.len() < 1536 * 1024 {
             text.push_str(&format!("{i},user{i}\n"));
             i += 1;
         }
-        text.push_str("9999,山田太郎\n");
+        text.push_str("9999,山田太郎,東京支社に所属しています\n");
+        text.push_str("10000,鈴木花子,新規プロジェクトの担当です\n");
         let t = parse(&encode(encoding_rs::SHIFT_JIS, &text));
-        assert_eq!(t.encoding, encoding_rs::UTF_8);
+        assert_eq!(t.encoding, encoding_rs::SHIFT_JIS);
+        assert_eq!(t.cell(t.row_count() - 1, 1), "鈴木花子");
     }
 
     #[test]
-    fn detects_shift_jis_just_inside_scan_limit() {
-        // 上限の内側に最初の日本語があれば、その後の量が多くても判定できる。
-        let mut text = String::from("id,name\n");
-        let mut i = 0;
-        while text.len() < DETECT_SCAN_LIMIT - 4096 {
-            text.push_str(&format!("{i},user{i}\n"));
-            i += 1;
-        }
-        for k in 0..200 {
-            text.push_str(&format!("{k},山田太郎,東京支社に所属しています\n"));
-        }
-        let t = parse(&encode(encoding_rs::SHIFT_JIS, &text));
+    fn find_first_non_ascii_marks_high_bytes_and_esc() {
+        assert_eq!(find_first_non_ascii(b""), None);
+        assert_eq!(find_first_non_ascii(b"id,name\n1,alice\n"), None);
+        assert_eq!(find_first_non_ascii(b"ab\x80cd"), Some(2));
+        assert_eq!(find_first_non_ascii(b"abc\x1b$B"), Some(3));
+        assert_eq!(find_first_non_ascii("ab名".as_bytes()), Some(2));
+    }
+
+    #[test]
+    fn forced_encoding_overrides_detection() {
+        let text = "名前,部署\n山田太郎,営業部\n鈴木花子,開発部\n";
+        let sjis = encode(encoding_rs::SHIFT_JIS, text);
+        let t = CsvTable::from_bytes_as(&sjis, Some(encoding_rs::SHIFT_JIS)).unwrap();
         assert_eq!(t.encoding, encoding_rs::SHIFT_JIS);
+        assert_eq!(t.cell(0, 0), "山田太郎");
+        // 間違った文字コードを指定しても、クラッシュせず文字化けとして読める。
+        let wrong = CsvTable::from_bytes_as(&sjis, Some(encoding_rs::UTF_8)).unwrap();
+        assert_eq!(wrong.encoding, encoding_rs::UTF_8);
+        assert_ne!(wrong.cell(0, 0), "山田太郎");
+    }
+
+    #[test]
+    fn forced_encoding_strips_matching_bom_only() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("名前\n山田\n".as_bytes());
+        let t = CsvTable::from_bytes_as(&bytes, Some(encoding_rs::UTF_8)).unwrap();
+        assert_eq!(t.header(0), "名前");
     }
 
     #[test]
