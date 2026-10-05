@@ -7,7 +7,7 @@ mod table;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, Menu, MenuItem,
@@ -29,6 +29,9 @@ const CHAR_WIDTH: f32 = 7.5;
 const CELL_PADDING: f32 = 16.0;
 const WIDTH_SAMPLE_ROWS: usize = 1000;
 /// 遅延読み込みの索引作成中に、画面を更新する間隔。
+/// 最初の `FAST_POLL_PERIOD` の間は1フレーム（約16ms）ごとに更新して、最初の行をすぐ見せる。
+const FAST_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const FAST_POLL_PERIOD: Duration = Duration::from_millis(500);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// 遅延読み込みできない文字コードのとき、全読み込みで開き直してよい最大サイズ。
 const EAGER_FALLBACK_LIMIT: u64 = 1024 * 1024 * 1024;
@@ -58,11 +61,21 @@ impl Loaded {
     }
 
     /// 索引作成中は行や列が増えるので、列幅の元にした範囲が古くなったら計算し直す。
-    fn refresh_widths(&mut self) {
+    /// 計算し直したら `true`。
+    ///
+    /// 標本を毎回デコードし直すと、1行が大きい表で更新のたびに重くなる。そこで、標本の行数が
+    /// 倍になったときと、索引が完了したときだけ計算し直す（総量は最終的な標本の2倍以内）。
+    fn refresh_widths(&mut self) -> bool {
         let rows = self.table.row_count().min(WIDTH_SAMPLE_ROWS);
-        if rows != self.sampled_rows || self.table.column_count() != self.col_widths.len() {
+        let indexing_done = self.table.indexing_percent().is_none();
+        let doubled = rows >= self.sampled_rows.saturating_mul(2).max(1);
+        let finished_with_new_rows = indexing_done && rows != self.sampled_rows;
+        let columns_changed = self.table.column_count() != self.col_widths.len();
+        if doubled || finished_with_new_rows || columns_changed {
             (self.col_widths, self.sampled_rows) = column_widths(&self.table);
+            return true;
         }
+        false
     }
 }
 
@@ -196,8 +209,14 @@ impl Viewer {
 
         let timer = cx.background_executor().clone();
         self.poll_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let started = Instant::now();
             loop {
-                timer.timer(POLL_INTERVAL).await;
+                let interval = if started.elapsed() < FAST_POLL_PERIOD {
+                    FAST_POLL_INTERVAL
+                } else {
+                    POLL_INTERVAL
+                };
+                timer.timer(interval).await;
                 let keep_going = this
                     .update_in(cx, |this, window, cx| this.poll_index(&path, window, cx))
                     .unwrap_or(false);
@@ -634,4 +653,58 @@ fn setup_app(cx: &mut App) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lazy_table::LazyTable;
+
+    fn lazy(text: &str) -> (Loaded, IndexJob) {
+        let (table, job) = LazyTable::open(Arc::new(text.as_bytes().to_vec()), None);
+        (Loaded::new(Table::Lazy(table)), job)
+    }
+
+    #[test]
+    fn widths_are_recomputed_only_when_the_sample_doubles_or_indexing_finishes() {
+        let text: String = (0..700).map(|i| format!("{i},name{i}\n")).collect();
+        let (mut loaded, mut job) = lazy(&format!("id,name\n{text}"));
+
+        let mut recomputed = 0;
+        loop {
+            let more = job.step(64);
+            if loaded.refresh_widths() {
+                recomputed += 1;
+            }
+            if !more {
+                break;
+            }
+        }
+        // 約700行を、64バイトずつ数百回の更新で読んでも、再計算は対数回に収まる。
+        assert!(recomputed <= 14, "recomputed {recomputed} times");
+        assert_eq!(loaded.sampled_rows, 700);
+        // 最終的な列幅は、全行を見た場合と同じ。
+        let (expected, _) = column_widths(&loaded.table);
+        assert_eq!(loaded.col_widths, expected);
+        assert!(!loaded.refresh_widths(), "nothing changes after indexing is done");
+    }
+
+    #[test]
+    fn widths_follow_columns_that_appear_later() {
+        let (mut loaded, mut job) = lazy("a\n1\n2\n3,4,5\n");
+        job.step(4);
+        loaded.refresh_widths();
+        while job.step(4) {
+            loaded.refresh_widths();
+        }
+        loaded.refresh_widths();
+        assert_eq!(loaded.col_widths.len(), 3);
+    }
+
+    #[test]
+    fn eager_tables_never_need_a_recompute() {
+        let table = Table::Eager(csv_data::CsvTable::from_bytes(b"a,b\n1,2\n").unwrap());
+        let mut loaded = Loaded::new(table);
+        assert!(!loaded.refresh_widths());
+    }
 }
