@@ -65,7 +65,8 @@ impl Viewer {
             }));
         let total_width: f32 = loaded.col_widths.iter().sum();
         let row_count = loaded.table.row_count();
-        let gutter_width = gutter_width(row_count);
+        let show_numbers = self.show_numbers;
+        let gutter_width = self.gutter_width();
 
         // 縦は自前で仮想スクロールする。全体の座標（数億px）は使わず、見えている先頭行の番号と、
         // その行の中でのずれ（0〜行の高さ）だけで位置を持つ。各行の位置が小さな値になるので、
@@ -135,7 +136,7 @@ impl Viewer {
             .child(
                 div()
                     .w(px(gutter_width))
-                    .h(px(HEADER_HEIGHT))
+                    .h(px(COLNO_HEIGHT + ROW_HEIGHT))
                     .flex_shrink_0()
                     .bg(rgb(0xe8e8e8))
                     .border_b_1()
@@ -180,7 +181,7 @@ impl Viewer {
             .h_full()
             .min_w(px(total_width))
             .w_full()
-            .child(colno)
+            .when(show_numbers, |d| d.child(colno))
             .child(header)
             .child(list);
 
@@ -220,7 +221,7 @@ impl Viewer {
                     cx.notify();
                 }
             }))
-            .child(gutter)
+            .when(show_numbers, |d| d.child(gutter))
             .child(div().flex_1().min_w_0().h_full().child(h_scroll_area))
             .children(vbar)
             .children(hbar)
@@ -288,6 +289,9 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.show_numbers = cx
+            .try_global::<ViewSettings>()
+            .map_or(true, |s| s.show_numbers);
         let body = if self.loaded.is_some() {
             self.render_table(window, cx).into_any_element()
         } else if self.loading.is_some() {
@@ -375,6 +379,7 @@ impl Render for Viewer {
                 }),
             )
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &ToggleNumbers, _, cx| this.toggle_numbers(cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
             .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| {
                 this.move_or_scroll(Step::Up, Nav::LineUp, cx)

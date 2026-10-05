@@ -91,7 +91,7 @@ impl Viewer {
         Some(
             div()
                 .absolute()
-                .top(px(HEADER_HEIGHT + 8.0))
+                .top(px(self.header_height() + 8.0))
                 .left_0()
                 .right_0()
                 .flex()

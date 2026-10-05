@@ -75,8 +75,6 @@ const SELECTED_CELL_BG: Rgba = Rgba {
 };
 /// 列番号の行の高さ。ヘッダー行の上に置く。
 const COLNO_HEIGHT: f32 = 20.0;
-/// 縦スクロールしない部分（列番号の行とヘッダー行）の高さ。
-const HEADER_HEIGHT: f32 = COLNO_HEIGHT + ROW_HEIGHT;
 const MIN_GUTTER_WIDTH: f32 = 40.0;
 const MIN_COL_WIDTH: f32 = 60.0;
 const MAX_COL_WIDTH: f32 = 400.0;
@@ -170,7 +168,23 @@ impl Loaded {
     }
 }
 
+/// 表示の設定。すべてのウィンドウで共通。
+pub(crate) struct ViewSettings {
+    /// 行番号の欄と、列番号の行を出すか。
+    pub(crate) show_numbers: bool,
+}
+
+impl gpui::Global for ViewSettings {}
+
+impl Default for ViewSettings {
+    fn default() -> Self {
+        Self { show_numbers: true }
+    }
+}
+
 pub(crate) struct Viewer {
+    /// 行番号・列番号を出すか。描画のたびに、`ViewSettings` から写す。
+    show_numbers: bool,
     loaded: Option<Loaded>,
     /// 直近の読み込み失敗など、ステータスバーに出すメッセージ。
     error: Option<String>,
@@ -230,6 +244,7 @@ pub(crate) struct Viewer {
 impl Viewer {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            show_numbers: true,
             loaded: None,
             error: None,
             loading: None,
@@ -271,7 +286,31 @@ impl Viewer {
 
     /// 行番号の欄の幅。行数の桁数で決まる。
     fn gutter_width(&self) -> f32 {
-        gutter_width(self.row_count())
+        if self.show_numbers {
+            gutter_width(self.row_count())
+        } else {
+            0.0
+        }
+    }
+
+    /// 縦スクロールしない部分（列番号の行とヘッダー行）の高さ。
+    fn header_height(&self) -> f32 {
+        if self.show_numbers {
+            COLNO_HEIGHT + ROW_HEIGHT
+        } else {
+            ROW_HEIGHT
+        }
+    }
+
+    /// 行番号・列番号の表示を切り替える。設定は全ウィンドウで共通なので、全部を描き直す。
+    fn toggle_numbers(&mut self, cx: &mut Context<Self>) {
+        let settings = cx
+            .try_global::<ViewSettings>()
+            .map_or(true, |s| s.show_numbers);
+        cx.set_global(ViewSettings {
+            show_numbers: !settings,
+        });
+        cx.refresh_windows();
     }
 
     fn navigate(&mut self, nav: Nav, cx: &mut Context<Self>) {

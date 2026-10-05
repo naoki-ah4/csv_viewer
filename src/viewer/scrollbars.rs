@@ -62,7 +62,7 @@ impl Viewer {
                 "vbar",
                 div()
                     .absolute()
-                    .top(px(HEADER_HEIGHT) + thumb.pos)
+                    .top(px(self.header_height()) + thumb.pos)
                     .right(px(scrollbar::MARGIN))
                     .w(px(scrollbar::THICKNESS))
                     .h(thumb.len),

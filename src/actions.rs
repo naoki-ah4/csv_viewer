@@ -12,6 +12,7 @@ actions!(
         FindInTable,
         FindNext,
         FindPrevious,
+        ToggleNumbers,
         CopySelection,
         SelectAllCells,
         ExtendUp,

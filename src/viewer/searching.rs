@@ -433,7 +433,7 @@ impl Viewer {
                 .id("search-bar")
                 .occlude()
                 .absolute()
-                .top(px(HEADER_HEIGHT + 8.0))
+                .top(px(self.header_height() + 8.0))
                 .right(px(24.0))
                 .w(px(340.0))
                 .flex()

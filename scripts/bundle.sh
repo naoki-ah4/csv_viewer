@@ -4,7 +4,7 @@
 #   scripts/bundle.sh           # target/bundle/CSV Viewer.app を作る
 #   open "target/bundle/CSV Viewer.app" --args samples/utf8.csv
 #
-# 名前・識別子・アイコンは仮のもの。ad-hoc 署名（`-`）なので、手元で使う分には動くが、
+# 識別子は仮のもの。アイコンは assets/icon.icns（作り方は scripts/make_icon.sh）。ad-hoc 署名（`-`）なので、手元で使う分には動くが、
 # 配布用の署名や公証（notarization）はしていない。
 #
 # Finder の「このアプリケーションで開く」に .csv で出てくるようにするには、
@@ -23,6 +23,7 @@ APP="target/bundle/${APP_NAME}.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "target/release/${BIN_NAME}" "$APP/Contents/MacOS/${BIN_NAME}"
+cp assets/icon.icns "$APP/Contents/Resources/icon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,6 +36,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
     <key>CFBundleExecutable</key>
     <string>${BIN_NAME}</string>
     <key>CFBundlePackageType</key>
