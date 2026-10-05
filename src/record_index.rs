@@ -203,7 +203,8 @@ impl RecordIndex {
         self.max_fields
     }
 
-    fn block_start(&self, record: usize) -> Option<usize> {
+    /// レコード `record` を含むブロックの先頭位置。レコード数の範囲外なら `None`。
+    pub fn block_start(&self, record: usize) -> Option<usize> {
         (record < self.record_count).then(|| self.block_starts[record / STRIDE] as usize)
     }
 }
@@ -226,9 +227,17 @@ pub fn build<U: Unit>(bytes: &[u8], body_start: usize) -> RecordIndex {
 /// レコード `record`（0始まり、ヘッダーも1レコード）の `bytes` 上の範囲。
 pub fn locate<U: Unit>(bytes: &[u8], index: &RecordIndex, record: usize) -> Option<Range<usize>> {
     let start = index.block_start(record)?;
-    let end = aligned_end::<U>(bytes);
-    let to_skip = record % STRIDE;
+    locate_in_block::<U>(bytes, start, record % STRIDE)
+}
 
+/// ブロックの先頭 `start` から走査して、`to_skip` 個先のレコードの範囲を返す。
+/// 索引のロックを持たずに走査できるよう、`locate` から分けてある。
+pub fn locate_in_block<U: Unit>(
+    bytes: &[u8],
+    start: usize,
+    to_skip: usize,
+) -> Option<Range<usize>> {
+    let end = aligned_end::<U>(bytes);
     let mut seen = 0;
     let mut found = None;
     let mut scanner = Scanner::new(start);
@@ -248,7 +257,7 @@ pub fn locate<U: Unit>(bytes: &[u8], index: &RecordIndex, record: usize) -> Opti
 }
 
 /// 末尾の中途半端なユニット（UTF-16 の奇数バイト）を除いた終端位置。
-fn aligned_end<U: Unit>(bytes: &[u8]) -> usize {
+pub fn aligned_end<U: Unit>(bytes: &[u8]) -> usize {
     bytes.len() - bytes.len() % U::WIDTH
 }
 
