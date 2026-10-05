@@ -32,7 +32,11 @@ fn rss_mb() -> f64 {
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()
         .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().unwrap_or(0.0) / 1024.0
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0)
+        / 1024.0
 }
 
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
@@ -45,7 +49,9 @@ fn ms(d: Duration) -> f64 {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: bench_lazy <file.csv> [chunk_bytes]");
+    let path = args
+        .next()
+        .expect("usage: bench_lazy <file.csv> [chunk_bytes]");
     // 省略時は本体と同じ既定のチャンクの大きさ。
     let chunk: Option<usize> = args.next().and_then(|a| a.parse().ok());
     let file = File::open(&path).unwrap();

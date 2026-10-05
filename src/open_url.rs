@@ -59,7 +59,10 @@ mod tests {
             Some(PathBuf::from("/Users/me/data.csv"))
         );
         // パスは、パーセントを含んでいても、デコードしない。
-        assert_eq!(path_from_url("/tmp/100%.csv"), Some(PathBuf::from("/tmp/100%.csv")));
+        assert_eq!(
+            path_from_url("/tmp/100%.csv"),
+            Some(PathBuf::from("/tmp/100%.csv"))
+        );
     }
 
     #[test]
@@ -67,7 +70,11 @@ mod tests {
         assert_eq!(path_from_url("https://example.com/data.csv"), None);
         assert_eq!(path_from_url(""), None);
         assert_eq!(path_from_url("   "), None);
-        assert_eq!(path_from_url("data.csv"), None, "relative paths are not accepted");
+        assert_eq!(
+            path_from_url("data.csv"),
+            None,
+            "relative paths are not accepted"
+        );
         assert_eq!(path_from_url("file://remote-host/share/data.csv"), None);
     }
 

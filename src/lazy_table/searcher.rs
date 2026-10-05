@@ -232,7 +232,9 @@ struct Scan<'a> {
 impl Scan<'_> {
     /// バイト範囲のレコードをデコードして、どこかのセルが一致するか。
     fn record_matches(&self, range: Range<usize>) -> bool {
-        let (text, _) = self.encoding.decode_without_bom_handling(&self.bytes[range]);
+        let (text, _) = self
+            .encoding
+            .decode_without_bom_handling(&self.bytes[range]);
         parse_record(&text)
             .iter()
             .any(|cell| self.matcher.is_match(cell))

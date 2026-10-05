@@ -38,7 +38,12 @@ pub trait Unit {
     }
 
     /// 1ユニットずつ調べる素朴な実装。1バイト単位の `Byte` は、これを SIMD に置き換える。
-    fn find_where(bytes: &[u8], from: usize, to: usize, found: impl Fn(u32) -> bool) -> Option<usize> {
+    fn find_where(
+        bytes: &[u8],
+        from: usize,
+        to: usize,
+        found: impl Fn(u32) -> bool,
+    ) -> Option<usize> {
         let mut pos = from;
         while pos + Self::WIDTH <= to {
             if found(Self::read(bytes, pos)) {
@@ -411,7 +416,11 @@ mod tests {
         let le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let (rows, index) = via_index::<Utf16Le>(&le, encoding_rs::UTF_16LE);
         assert_eq!(rows, expected, "utf-16le: {text:?}");
-        assert_eq!(index.max_fields(), max_fields, "utf-16le max_fields: {text:?}");
+        assert_eq!(
+            index.max_fields(),
+            max_fields,
+            "utf-16le max_fields: {text:?}"
+        );
 
         let be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
         let (rows, _) = via_index::<Utf16Be>(&be, encoding_rs::UTF_16BE);
@@ -478,7 +487,10 @@ mod tests {
 
     #[test]
     fn utf16_ignores_a_dangling_odd_byte() {
-        let mut le: Vec<u8> = "a,b\n1,2\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut le: Vec<u8> = "a,b\n1,2\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         le.push(0x41);
         let index = build::<Utf16Le>(&le, 0);
         assert_eq!(index.record_count(), 2);
@@ -508,7 +520,11 @@ mod tests {
         };
         for round in 0..6000 {
             // たまに長い入力を混ぜて、疎な索引のブロックをまたがせる。
-            let len = if round % 50 == 0 { 900 } else { (next() % 40) as usize };
+            let len = if round % 50 == 0 {
+                900
+            } else {
+                (next() % 40) as usize
+            };
             let text: String = (0..len)
                 .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
                 .collect();

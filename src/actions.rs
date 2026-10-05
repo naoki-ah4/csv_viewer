@@ -186,8 +186,14 @@ mod tests {
             Some("csv_viewer::ScrollPageDown")
         );
         // アプリ全体のキーも、入力中に効く。
-        assert_eq!(top_action(&keymap, &key("cmd-q"), &stack).as_deref(), Some("csv_viewer::Quit"));
-        assert_eq!(top_action(&keymap, &key("cmd-g"), &stack).as_deref(), Some("csv_viewer::FindNext"));
+        assert_eq!(
+            top_action(&keymap, &key("cmd-q"), &stack).as_deref(),
+            Some("csv_viewer::Quit")
+        );
+        assert_eq!(
+            top_action(&keymap, &key("cmd-g"), &stack).as_deref(),
+            Some("csv_viewer::FindNext")
+        );
     }
 
     #[test]

@@ -48,8 +48,7 @@ pub fn find_row_in_csv(
     cancel: &AtomicBool,
 ) -> Outcome<usize> {
     let columns = table.column_count();
-    let row_matches =
-        |row: usize| (0..columns).any(|col| matcher.is_match(table.cell(row, col)));
+    let row_matches = |row: usize| (0..columns).any(|col| matcher.is_match(table.cell(row, col)));
     let check = |row: usize, step: usize| row % step == 0 && cancel.load(Ordering::Relaxed);
     match dir {
         Direction::Forward => {
@@ -250,7 +249,12 @@ mod tests {
     fn expected_row(o: &Oracle, from_row: usize, dir: Direction) -> Outcome<usize> {
         let found = match dir {
             Direction::Forward => o.matching_rows.iter().copied().find(|&r| r >= from_row),
-            Direction::Backward => o.matching_rows.iter().copied().rev().find(|&r| r < from_row),
+            Direction::Backward => o
+                .matching_rows
+                .iter()
+                .copied()
+                .rev()
+                .find(|&r| r < from_row),
         };
         found.map_or(Outcome::NotFound, Outcome::Found)
     }
@@ -269,9 +273,21 @@ mod tests {
             for dir in [Direction::Forward, Direction::Backward] {
                 let want = expected_row(&o, from_row, dir);
                 let ctx = format!("{label} {needle:?} from {from_row} {dir:?}");
-                assert_eq!(f.eager.find_row(&matcher, from_row, dir, &NEVER), want, "eager: {ctx}");
-                assert_eq!(normal.find_row(&matcher, from_row, dir, &NEVER), want, "lazy: {ctx}");
-                assert_eq!(tiny.find_row(&matcher, from_row, dir, &NEVER), want, "lazy tiny: {ctx}");
+                assert_eq!(
+                    f.eager.find_row(&matcher, from_row, dir, &NEVER),
+                    want,
+                    "eager: {ctx}"
+                );
+                assert_eq!(
+                    normal.find_row(&matcher, from_row, dir, &NEVER),
+                    want,
+                    "lazy: {ctx}"
+                );
+                assert_eq!(
+                    tiny.find_row(&matcher, from_row, dir, &NEVER),
+                    want,
+                    "lazy tiny: {ctx}"
+                );
             }
         }
 
@@ -279,22 +295,38 @@ mod tests {
         for table in [&f.eager, &f.lazy] {
             let mut forward = Vec::new();
             let mut at = None;
-            while let Outcome::Found(m) = find_match(table, &matcher, at, Direction::Forward, &NEVER) {
+            while let Outcome::Found(m) =
+                find_match(table, &matcher, at, Direction::Forward, &NEVER)
+            {
                 forward.push(m);
                 at = Some(m);
-                assert!(forward.len() <= o.matching_cells.len() + 1, "{label} {needle:?}: runaway");
+                assert!(
+                    forward.len() <= o.matching_cells.len() + 1,
+                    "{label} {needle:?}: runaway"
+                );
             }
-            assert_eq!(forward, o.matching_cells, "forward cells: {label} {needle:?}");
+            assert_eq!(
+                forward, o.matching_cells,
+                "forward cells: {label} {needle:?}"
+            );
 
             let mut backward = Vec::new();
             let mut at = None;
-            while let Outcome::Found(m) = find_match(table, &matcher, at, Direction::Backward, &NEVER) {
+            while let Outcome::Found(m) =
+                find_match(table, &matcher, at, Direction::Backward, &NEVER)
+            {
                 backward.push(m);
                 at = Some(m);
-                assert!(backward.len() <= o.matching_cells.len() + 1, "{label} {needle:?}: runaway");
+                assert!(
+                    backward.len() <= o.matching_cells.len() + 1,
+                    "{label} {needle:?}: runaway"
+                );
             }
             backward.reverse();
-            assert_eq!(backward, o.matching_cells, "backward cells: {label} {needle:?}");
+            assert_eq!(
+                backward, o.matching_cells,
+                "backward cells: {label} {needle:?}"
+            );
 
             let want = (o.matching_rows.len(), false);
             assert_eq!(
@@ -340,9 +372,29 @@ mod tests {
         for encoding in ENCODINGS {
             let bytes = encode(encoding, SAMPLE);
             for needle in [
-                "hello", "HELLO", "Tokyo", "tokyo office", "山田", "山", "太郎", "あ", "ア", "アイ",
-                "A", "a", "ken", "line1\nline2", "\n", "a,b", "\"", "Hi", "say \"Hi\"", ",",
-                "zzz", "名前", "id",
+                "hello",
+                "HELLO",
+                "Tokyo",
+                "tokyo office",
+                "山田",
+                "山",
+                "太郎",
+                "あ",
+                "ア",
+                "アイ",
+                "A",
+                "a",
+                "ken",
+                "line1\nline2",
+                "\n",
+                "a,b",
+                "\"",
+                "Hi",
+                "say \"Hi\"",
+                ",",
+                "zzz",
+                "名前",
+                "id",
             ] {
                 check(SAMPLE, &bytes, encoding, needle, encoding.name());
             }
@@ -356,14 +408,21 @@ mod tests {
         for encoding in ENCODINGS {
             let bytes = encode(encoding, text);
             let o = oracle(text, "a,b");
-            assert_eq!(o.matching_rows, vec![2], "only the quoted cell contains a,b");
+            assert_eq!(
+                o.matching_rows,
+                vec![2],
+                "only the quoted cell contains a,b"
+            );
             check(text, &bytes, encoding, "a,b", encoding.name());
         }
         // Shift_JIS では、「ア」(0x83 0x41) の2バイト目が「A」と同じ値になる。
         // 生のバイト列では一致しても、セルの文字には、英字の A はない。
         let text = "x\nア\nァ\nイ\n";
         let bytes = encode(encoding_rs::SHIFT_JIS, text);
-        assert!(bytes.contains(&0x41), "the trail byte looks like an ASCII A");
+        assert!(
+            bytes.contains(&0x41),
+            "the trail byte looks like an ASCII A"
+        );
         let o = oracle(text, "A");
         assert!(o.matching_rows.is_empty());
         check(text, &bytes, encoding_rs::SHIFT_JIS, "A", "sjis trail byte");
@@ -391,8 +450,14 @@ mod tests {
         let bytes = encode(encoding_rs::SHIFT_JIS, text);
         let f = fixture(&bytes, encoding_rs::SHIFT_JIS);
         let matcher = Matcher::new("😀").unwrap();
-        assert_eq!(f.lazy.find_row(&matcher, 0, Direction::Forward, &NEVER), Outcome::NotFound);
-        assert_eq!(f.eager.find_row(&matcher, 0, Direction::Forward, &NEVER), Outcome::NotFound);
+        assert_eq!(
+            f.lazy.find_row(&matcher, 0, Direction::Forward, &NEVER),
+            Outcome::NotFound
+        );
+        assert_eq!(
+            f.eager.find_row(&matcher, 0, Direction::Forward, &NEVER),
+            Outcome::NotFound
+        );
     }
 
     #[test]
@@ -401,7 +466,10 @@ mod tests {
             let f = fixture(&encode(encoding, ""), encoding);
             let matcher = Matcher::new("a").unwrap();
             for dir in [Direction::Forward, Direction::Backward] {
-                assert_eq!(f.eager.find_row(&matcher, 0, dir, &NEVER), Outcome::NotFound);
+                assert_eq!(
+                    f.eager.find_row(&matcher, 0, dir, &NEVER),
+                    Outcome::NotFound
+                );
                 assert_eq!(f.lazy.find_row(&matcher, 0, dir, &NEVER), Outcome::NotFound);
             }
         }
@@ -414,10 +482,22 @@ mod tests {
         let f = fixture(&bytes, encoding_rs::UTF_8);
         let matcher = Matcher::new("zzz").unwrap();
         let cancel = AtomicBool::new(true);
-        assert_eq!(f.eager.find_row(&matcher, 0, Direction::Forward, &cancel), Outcome::Cancelled);
-        assert_eq!(f.lazy.find_row(&matcher, 0, Direction::Forward, &cancel), Outcome::Cancelled);
-        assert_eq!(f.lazy.find_row(&matcher, 50, Direction::Backward, &cancel), Outcome::Cancelled);
-        assert_eq!(count_rows(&f.lazy, &matcher, 10, &cancel), Outcome::Cancelled);
+        assert_eq!(
+            f.eager.find_row(&matcher, 0, Direction::Forward, &cancel),
+            Outcome::Cancelled
+        );
+        assert_eq!(
+            f.lazy.find_row(&matcher, 0, Direction::Forward, &cancel),
+            Outcome::Cancelled
+        );
+        assert_eq!(
+            f.lazy.find_row(&matcher, 50, Direction::Backward, &cancel),
+            Outcome::Cancelled
+        );
+        assert_eq!(
+            count_rows(&f.lazy, &matcher, 10, &cancel),
+            Outcome::Cancelled
+        );
     }
 
     #[test]
@@ -427,24 +507,44 @@ mod tests {
         let f = fixture(&bytes, encoding_rs::UTF_8);
         let matcher = Matcher::new("hit").unwrap();
         // 先頭の行（ヘッダー）は数えないので、一致するのは99行。
-        assert_eq!(count_rows(&f.eager, &matcher, 1000, &NEVER), Outcome::Found((99, false)));
-        assert_eq!(count_rows(&f.lazy, &matcher, 1000, &NEVER), Outcome::Found((99, false)));
-        assert_eq!(count_rows(&f.eager, &matcher, 10, &NEVER), Outcome::Found((10, true)));
-        assert_eq!(count_rows(&f.lazy, &matcher, 10, &NEVER), Outcome::Found((10, true)));
+        assert_eq!(
+            count_rows(&f.eager, &matcher, 1000, &NEVER),
+            Outcome::Found((99, false))
+        );
+        assert_eq!(
+            count_rows(&f.lazy, &matcher, 1000, &NEVER),
+            Outcome::Found((99, false))
+        );
+        assert_eq!(
+            count_rows(&f.eager, &matcher, 10, &NEVER),
+            Outcome::Found((10, true))
+        );
+        assert_eq!(
+            count_rows(&f.lazy, &matcher, 10, &NEVER),
+            Outcome::Found((10, true))
+        );
     }
 
     #[test]
     fn only_the_indexed_part_is_searched_while_indexing_is_in_progress() {
-        let text: String = (0..2000).map(|i| format!("{i},{}\n", if i == 1900 { "needle" } else { "x" })).collect();
+        let text: String = (0..2000)
+            .map(|i| format!("{i},{}\n", if i == 1900 { "needle" } else { "x" }))
+            .collect();
         let bytes = encode(encoding_rs::UTF_8, &text);
         let (table, mut job) = LazyTable::open(Arc::new(bytes), Some(encoding_rs::UTF_8));
         let searcher = table.searcher();
         let matcher = Matcher::new("needle").unwrap();
 
         job.step(2_000);
-        assert_eq!(searcher.find_row(&matcher, 0, Direction::Forward, &NEVER), Outcome::NotFound);
+        assert_eq!(
+            searcher.find_row(&matcher, 0, Direction::Forward, &NEVER),
+            Outcome::NotFound
+        );
         while job.step(2_000) {}
-        assert_eq!(searcher.find_row(&matcher, 0, Direction::Forward, &NEVER), Outcome::Found(1899));
+        assert_eq!(
+            searcher.find_row(&matcher, 0, Direction::Forward, &NEVER),
+            Outcome::Found(1899)
+        );
         // 索引ができたあとなら、後ろ向きでも見つかる。
         assert_eq!(
             searcher.find_row(&matcher, 2000, Direction::Backward, &NEVER),
@@ -470,14 +570,28 @@ mod tests {
         };
         for round in 0..120 {
             // たまに長い表を混ぜて、疎な索引の複数のブロックと、走査の窓を、またがせる。
-            let len = if round % 20 == 0 { 700 } else { (next() % 60) as usize };
+            let len = if round % 20 == 0 {
+                700
+            } else {
+                (next() % 60) as usize
+            };
             let text: String = (0..len)
                 .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
                 .collect();
-            for encoding in [encoding_rs::UTF_8, encoding_rs::SHIFT_JIS, encoding_rs::UTF_16LE] {
+            for encoding in [
+                encoding_rs::UTF_8,
+                encoding_rs::SHIFT_JIS,
+                encoding_rs::UTF_16LE,
+            ] {
                 let bytes = encode(encoding, &text);
                 for needle in NEEDLES {
-                    check(&text, &bytes, encoding, needle, &format!("round {round} {}", encoding.name()));
+                    check(
+                        &text,
+                        &bytes,
+                        encoding,
+                        needle,
+                        &format!("round {round} {}", encoding.name()),
+                    );
                 }
             }
         }
@@ -492,12 +606,24 @@ mod tests {
 
     #[test]
     fn previous_cell_steps_back_across_rows() {
-        assert_eq!(Match { row: 3, col: 2 }.previous_cell(5), Some(Match { row: 3, col: 1 }));
-        assert_eq!(Match { row: 3, col: 0 }.previous_cell(5), Some(Match { row: 2, col: 4 }));
-        assert_eq!(Match { row: 0, col: 1 }.previous_cell(5), Some(Match { row: 0, col: 0 }));
+        assert_eq!(
+            Match { row: 3, col: 2 }.previous_cell(5),
+            Some(Match { row: 3, col: 1 })
+        );
+        assert_eq!(
+            Match { row: 3, col: 0 }.previous_cell(5),
+            Some(Match { row: 2, col: 4 })
+        );
+        assert_eq!(
+            Match { row: 0, col: 1 }.previous_cell(5),
+            Some(Match { row: 0, col: 0 })
+        );
         assert_eq!(Match { row: 0, col: 0 }.previous_cell(5), None);
         // 列がない表でも、あふれない。
-        assert_eq!(Match { row: 1, col: 0 }.previous_cell(0), Some(Match { row: 0, col: 0 }));
+        assert_eq!(
+            Match { row: 1, col: 0 }.previous_cell(0),
+            Some(Match { row: 0, col: 0 })
+        );
     }
 
     #[test]
@@ -525,4 +651,3 @@ mod tests {
         assert_eq!(first_row_to_search(None, Direction::Backward, 100), 100);
     }
 }
-

@@ -127,7 +127,12 @@ impl Viewer {
     }
 
     /// 索引作成の途中経過を画面に反映する。続けて呼ぶ必要があれば `true`。
-    pub(super) fn poll_index(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn poll_index(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(loaded) = self.loaded.as_mut() else {
             return false;
         };

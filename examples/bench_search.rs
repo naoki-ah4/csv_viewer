@@ -27,7 +27,9 @@ use memchr::memchr;
 use memmap2::Mmap;
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: bench_search <file.csv>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: bench_search <file.csv>");
     let file = File::open(&path).unwrap();
     // SAFETY: 計測中に他のプロセスがファイルを変更しないことを前提とする。
     let mmap = unsafe { Mmap::map(&file).unwrap() };
@@ -36,7 +38,10 @@ fn main() {
     let t = Instant::now();
     job.run(&AtomicBool::new(false));
     let rows = table.row_count();
-    println!("file {file_mb:.0} MB, {rows} rows, indexed in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "file {file_mb:.0} MB, {rows} rows, indexed in {:.0} ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
 
     let searcher = table.searcher();
     let never = AtomicBool::new(false);
@@ -46,13 +51,48 @@ fn main() {
         Outcome::Cancelled => "cancelled".to_string(),
     };
     let cases = [
-        ("absent, lowercase, forward (full scan)", "zzzz-not-here-zzzz", Direction::Forward, 0),
-        ("absent, UPPERCASE letters (case-insensitive), forward", "ZZZZ-NOT-HERE-ZZZZ", Direction::Forward, 0),
-        ("absent, backward from the end (full scan)", "zzzz-not-here-zzzz", Direction::Backward, rows),
-        ("absent, Japanese, forward (full scan)", "あいうえおかきくけこ", Direction::Forward, 0),
-        ("common digit, first match forward", "2", Direction::Forward, 0),
-        ("common digit, first match backward from the end", "2", Direction::Backward, rows),
-        ("absent, with a quote in the needle, forward", "zz\"zz", Direction::Forward, 0),
+        (
+            "absent, lowercase, forward (full scan)",
+            "zzzz-not-here-zzzz",
+            Direction::Forward,
+            0,
+        ),
+        (
+            "absent, UPPERCASE letters (case-insensitive), forward",
+            "ZZZZ-NOT-HERE-ZZZZ",
+            Direction::Forward,
+            0,
+        ),
+        (
+            "absent, backward from the end (full scan)",
+            "zzzz-not-here-zzzz",
+            Direction::Backward,
+            rows,
+        ),
+        (
+            "absent, Japanese, forward (full scan)",
+            "あいうえおかきくけこ",
+            Direction::Forward,
+            0,
+        ),
+        (
+            "common digit, first match forward",
+            "2",
+            Direction::Forward,
+            0,
+        ),
+        (
+            "common digit, first match backward from the end",
+            "2",
+            Direction::Backward,
+            rows,
+        ),
+        (
+            "absent, with a quote in the needle, forward",
+            "zz\"zz",
+            Direction::Forward,
+            0,
+        ),
     ];
     for (label, needle, dir, from) in cases {
         let matcher = Matcher::new(needle).unwrap();

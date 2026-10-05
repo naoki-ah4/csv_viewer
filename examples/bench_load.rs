@@ -17,7 +17,10 @@ use csv_data::CsvTable;
 
 /// BENCH_RUNS=1 にすると1回だけ実行する（ピークメモリを測るときは、前回の結果が残らないようこちらを使う）。
 fn runs() -> usize {
-    std::env::var("BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(5)
+    std::env::var("BENCH_RUNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5)
 }
 
 /// 現在のRSS(MB)。`ps` 経由の簡易計測（診断用）。
@@ -26,17 +29,29 @@ fn rss_mb() -> f64 {
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()
         .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().unwrap_or(0.0) / 1024.0
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0)
+        / 1024.0
 }
 
 fn generate(target_bytes: usize, ascii: bool) -> String {
     let mut s = String::with_capacity(target_bytes + 128);
-    s.push_str(if ascii { "id,name,dept,memo,amount\n" } else { "id,名前,部署,メモ,金額\n" });
+    s.push_str(if ascii {
+        "id,name,dept,memo,amount\n"
+    } else {
+        "id,名前,部署,メモ,金額\n"
+    });
     let mut i = 0usize;
     while s.len() < target_bytes {
         use std::fmt::Write;
         if ascii {
-            writeln!(s, "{i},test taro{i},sales,\"row {i} memo, quoted\",{}", i * 37 % 100_000)
+            writeln!(
+                s,
+                "{i},test taro{i},sales,\"row {i} memo, quoted\",{}",
+                i * 37 % 100_000
+            )
         } else {
             writeln!(
                 s,
@@ -84,7 +99,10 @@ fn main() {
     });
     let (total_ms, table) = best_of(|| CsvTable::from_bytes(&bytes).unwrap());
 
-    eprintln!("rss: after input built={rss_input:.0}MB  after load={:.0}MB", rss_mb());
+    eprintln!(
+        "rss: after input built={rss_input:.0}MB  after load={:.0}MB",
+        rss_mb()
+    );
     println!(
         "{enc:>5} {:>6.1}MB  rows={:>8}  full_scan_detect(旧方式の参考値)={detect_ms:>7.1}ms  from_bytes(total)={total_ms:>7.1}ms  table_heap={:>6.1}MB",
         bytes.len() as f64 / 1024.0 / 1024.0,

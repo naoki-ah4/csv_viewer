@@ -220,18 +220,49 @@ mod tests {
         ] {
             let bytes = encoding.encode(text).0.into_owned();
             let at = encode_needle("xx", encoding).unwrap().len(); // 「xx」の直後が「山田」
-            assert_eq!(raw_matches("山田", encoding, &bytes), vec![at], "{}", encoding.name());
+            assert_eq!(
+                raw_matches("山田", encoding, &bytes),
+                vec![at],
+                "{}",
+                encoding.name()
+            );
             // 英字は大文字小文字を区別しない。
-            assert_eq!(raw_matches("hello", encoding, &bytes).len(), 1, "{}", encoding.name());
-            assert_eq!(raw_matches("HELLO", encoding, &bytes).len(), 1, "{}", encoding.name());
+            assert_eq!(
+                raw_matches("hello", encoding, &bytes).len(),
+                1,
+                "{}",
+                encoding.name()
+            );
+            assert_eq!(
+                raw_matches("HELLO", encoding, &bytes).len(),
+                1,
+                "{}",
+                encoding.name()
+            );
         }
         for (encoding, to_bytes) in [
-            (encoding_rs::UTF_16LE, u16::to_le_bytes as fn(u16) -> [u8; 2]),
-            (encoding_rs::UTF_16BE, u16::to_be_bytes as fn(u16) -> [u8; 2]),
+            (
+                encoding_rs::UTF_16LE,
+                u16::to_le_bytes as fn(u16) -> [u8; 2],
+            ),
+            (
+                encoding_rs::UTF_16BE,
+                u16::to_be_bytes as fn(u16) -> [u8; 2],
+            ),
         ] {
             let bytes: Vec<u8> = text.encode_utf16().flat_map(to_bytes).collect();
-            assert_eq!(raw_matches("山田", encoding, &bytes), vec![4], "{}", encoding.name());
-            assert_eq!(raw_matches("hello", encoding, &bytes).len(), 1, "{}", encoding.name());
+            assert_eq!(
+                raw_matches("山田", encoding, &bytes),
+                vec![4],
+                "{}",
+                encoding.name()
+            );
+            assert_eq!(
+                raw_matches("hello", encoding, &bytes).len(),
+                1,
+                "{}",
+                encoding.name()
+            );
         }
     }
 
@@ -284,7 +315,10 @@ mod tests {
         // 引用符がないものには、一致しない。
         assert!(!regex.is_match(b"say Hi"));
         // 最大の長さは、引用符を2つとして数える。
-        assert_eq!(needle.raw_len(encoding_rs::UTF_8), Some("say ".len() + 2 + "Hi".len() + 2));
+        assert_eq!(
+            needle.raw_len(encoding_rs::UTF_8),
+            Some("say ".len() + 2 + "Hi".len() + 2)
+        );
     }
 
     #[test]
@@ -297,4 +331,3 @@ mod tests {
         assert!(regex.is_match(&single));
     }
 }
-

@@ -43,23 +43,24 @@ fn main() {
         setup_app(cx);
 
         let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
-        let window = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                cx.new(|cx| {
-                    let mut viewer = Viewer::new(cx);
-                    if let Some(path) = &path {
-                        viewer.open_path(path.clone(), window, cx);
-                    }
-                    viewer.focus(window);
-                    viewer
-                })
-            },
-        )
-        .unwrap();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut viewer = Viewer::new(cx);
+                        if let Some(path) = &path {
+                            viewer.open_path(path.clone(), window, cx);
+                        }
+                        viewer.focus(window);
+                        viewer
+                    })
+                },
+            )
+            .unwrap();
         cx.activate(true);
 
         cx.spawn(async move |cx| {

@@ -40,10 +40,7 @@ impl CsvTable {
     }
 
     /// `forced` を指定すると、文字コードの自動判定をせずその文字コードで読む（手動切り替え用）。
-    pub fn from_bytes_as(
-        bytes: &[u8],
-        forced: Option<&'static Encoding>,
-    ) -> anyhow::Result<Self> {
+    pub fn from_bytes_as(bytes: &[u8], forced: Option<&'static Encoding>) -> anyhow::Result<Self> {
         let (encoding, body) = match forced {
             Some(encoding) => (encoding, strip_bom(bytes, encoding)),
             None => detect_encoding(bytes),
@@ -174,7 +171,9 @@ mod tests {
     }
 
     fn headers(t: &CsvTable) -> Vec<String> {
-        (0..t.column_count()).map(|c| t.header(c).to_string()).collect()
+        (0..t.column_count())
+            .map(|c| t.header(c).to_string())
+            .collect()
     }
 
     /// 各行の実際のセル数は取れないため、列数ぶん読んで末尾の空セルを落とす。
@@ -182,8 +181,9 @@ mod tests {
     fn rows(t: &CsvTable) -> Vec<Vec<String>> {
         (0..t.row_count())
             .map(|r| {
-                let mut row: Vec<String> =
-                    (0..t.column_count()).map(|c| t.cell(r, c).to_string()).collect();
+                let mut row: Vec<String> = (0..t.column_count())
+                    .map(|c| t.cell(r, c).to_string())
+                    .collect();
                 while row.last().is_some_and(String::is_empty) {
                     row.pop();
                 }
@@ -194,7 +194,11 @@ mod tests {
 
     fn encode(encoding: &'static Encoding, text: &str) -> Vec<u8> {
         let (bytes, _, had_errors) = encoding.encode(text);
-        assert!(!had_errors, "test fixture is not representable in {}", encoding.name());
+        assert!(
+            !had_errors,
+            "test fixture is not representable in {}",
+            encoding.name()
+        );
         bytes.into_owned()
     }
 

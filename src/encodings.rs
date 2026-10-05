@@ -92,7 +92,10 @@ mod tests {
         }
         // 一覧にない文字コードが指定された場合は、どれも選ばれていない。
         let unlisted = Some(encoding_rs::GBK);
-        assert_eq!(choices().iter().filter(|c| is_active(c, unlisted)).count(), 0);
+        assert_eq!(
+            choices().iter().filter(|c| is_active(c, unlisted)).count(),
+            0
+        );
     }
 
     #[test]
@@ -102,6 +105,9 @@ mod tests {
             status_label(encoding_rs::SHIFT_JIS, Some(encoding_rs::SHIFT_JIS)),
             "Shift_JIS（指定）"
         );
-        assert_eq!(status_label(encoding_rs::UTF_8, Some(encoding_rs::UTF_8)), "UTF-8（指定）");
+        assert_eq!(
+            status_label(encoding_rs::UTF_8, Some(encoding_rs::UTF_8)),
+            "UTF-8（指定）"
+        );
     }
 }

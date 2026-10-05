@@ -17,8 +17,15 @@ impl Viewer {
             .child("または Cmd+O で開く")
     }
 
-    pub(super) fn render_table(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let loaded = self.loaded.as_ref().expect("render_table requires a loaded CSV");
+    pub(super) fn render_table(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let loaded = self
+            .loaded
+            .as_ref()
+            .expect("render_table requires a loaded CSV");
         // ポップアップを出しているセル。目立たせる。
         let popup_cell = self.popup.as_ref().map(|p| (p.row, p.col));
         // 検索の一致を、画面に見えているセルだけ、強調する。
@@ -47,21 +54,15 @@ impl Viewer {
             .bg(rgb(0xe8e8e8))
             .text_xs()
             .text_color(rgb(0x888888))
-            .children(
-                loaded
-                    .col_widths
-                    .iter()
-                    .enumerate()
-                    .map(|(i, w)| {
-                        cell((i + 1).to_string(), *w)
-                            .when(
-                                selection.is_some_and(|s| s.cols(column_count).contains(&i)),
-                                |d| d.bg(SELECTED_CELL_BG),
-                            )
-                            .on_mouse_down(MouseButton::Left, Self::col_number_press(cx, i))
-                            .on_mouse_move(Self::col_number_drag(cx, i))
-                    }),
-            );
+            .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
+                cell((i + 1).to_string(), *w)
+                    .when(
+                        selection.is_some_and(|s| s.cols(column_count).contains(&i)),
+                        |d| d.bg(SELECTED_CELL_BG),
+                    )
+                    .on_mouse_down(MouseButton::Left, Self::col_number_press(cx, i))
+                    .on_mouse_move(Self::col_number_drag(cx, i))
+            }));
         let total_width: f32 = loaded.col_widths.iter().sum();
         let row_count = loaded.table.row_count();
         let gutter_width = gutter_width(row_count);
@@ -85,15 +86,16 @@ impl Viewer {
                 .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
                     let text = loaded.table.cell(ix, i).to_string();
                     // 強調の優先順位：選択範囲、検索の現在の一致、検索の一致。
-                    let background = if selection.is_some_and(|s| s.contains(ix, i, row_total, column_count)) {
-                        Some(SELECTED_CELL_BG)
-                    } else if search_current == Some(Match { row: ix, col: i }) {
-                        Some(SEARCH_CURRENT_BG)
-                    } else if search_matcher.is_some_and(|m| m.is_match(&text)) {
-                        Some(SEARCH_HIT_BG)
-                    } else {
-                        None
-                    };
+                    let background =
+                        if selection.is_some_and(|s| s.contains(ix, i, row_total, column_count)) {
+                            Some(SELECTED_CELL_BG)
+                        } else if search_current == Some(Match { row: ix, col: i }) {
+                            Some(SEARCH_CURRENT_BG)
+                        } else if search_matcher.is_some_and(|m| m.is_match(&text)) {
+                            Some(SEARCH_HIT_BG)
+                        } else {
+                            None
+                        };
                     cell(text, *w)
                         .when_some(background, |d, bg| d.bg(bg))
                         .on_mouse_down(MouseButton::Left, Self::cell_press(cx, ix, i))
@@ -111,11 +113,13 @@ impl Viewer {
                 .h(px(ROW_HEIGHT))
                 .px_2()
                 .text_color(rgb(0x888888))
-                .bg(if selection.is_some_and(|s| s.rows(row_total).contains(&ix)) {
-                    rgb(0xd6e6fb)
-                } else {
-                    rgb(if ix % 2 == 1 { 0xf0f0f0 } else { 0xf6f6f6 })
-                })
+                .bg(
+                    if selection.is_some_and(|s| s.rows(row_total).contains(&ix)) {
+                        rgb(0xd6e6fb)
+                    } else {
+                        rgb(if ix % 2 == 1 { 0xf0f0f0 } else { 0xf6f6f6 })
+                    },
+                )
                 .on_mouse_down(MouseButton::Left, Self::row_number_press(cx, ix))
                 .on_mouse_move(Self::row_number_drag(cx, ix))
                 .child((ix + 1).to_string())
@@ -303,17 +307,25 @@ impl Render for Viewer {
             .text_sm()
             .key_context(TABLE_CONTEXT)
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                this.handle_key_down(event, cx)
-            }))
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_key_down(event, cx)),
+            )
             .on_action(cx.listener(|this, _: &GotoRow, _, cx| this.open_goto(cx)))
-            .on_action(cx.listener(|this, _: &FindInTable, window, cx| this.open_search(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &FindInTable, window, cx| this.open_search(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy_selection(cx)))
             .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all_cells(cx)))
             .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend_selection(Step::Up, cx)))
-            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend_selection(Step::Down, cx)))
-            .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| this.extend_selection(Step::Left, cx)))
-            .on_action(cx.listener(|this, _: &ExtendRight, _, cx| this.extend_selection(Step::Right, cx)))
+            .on_action(
+                cx.listener(|this, _: &ExtendDown, _, cx| this.extend_selection(Step::Down, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendLeft, _, cx| this.extend_selection(Step::Left, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendRight, _, cx| this.extend_selection(Step::Right, cx)),
+            )
             .on_action(cx.listener(|this, _: &ExtendPageUp, _, cx| {
                 let rows = this.page_step_rows();
                 this.extend_selection(Step::PageUp(rows), cx)
@@ -322,8 +334,12 @@ impl Render for Viewer {
                 let rows = this.page_step_rows();
                 this.extend_selection(Step::PageDown(rows), cx)
             }))
-            .on_action(cx.listener(|this, _: &ExtendToTop, _, cx| this.extend_selection(Step::Top, cx)))
-            .on_action(cx.listener(|this, _: &ExtendToBottom, _, cx| this.extend_selection(Step::Bottom, cx)))
+            .on_action(
+                cx.listener(|this, _: &ExtendToTop, _, cx| this.extend_selection(Step::Top, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ExtendToBottom, _, cx| {
+                this.extend_selection(Step::Bottom, cx)
+            }))
             .on_action(cx.listener(|this, _: &FindNext, window, cx| {
                 if this.search_state.is_some() {
                     this.search_step(Direction::Forward, window, cx);
@@ -401,12 +417,14 @@ impl Render for Viewer {
             .on_action(cx.listener(|this, _: &ExtendToLineEnd, _, cx| {
                 this.extend_selection(Step::LineEnd, cx)
             }))
-            .on_action(cx.listener(|this, _: &ExtendToFirst, _, cx| {
-                this.extend_selection(Step::First, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ExtendToLast, _, cx| {
-                this.extend_selection(Step::Last, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &ExtendToFirst, _, cx| {
+                    this.extend_selection(Step::First, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendToLast, _, cx| this.extend_selection(Step::Last, cx)),
+            )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.paths().first() {
                     this.open_path(path.clone(), window, cx);

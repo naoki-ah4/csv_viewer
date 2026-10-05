@@ -4,7 +4,12 @@ use super::*;
 
 impl Viewer {
     /// 範囲を広げる操作の、共通の準備。開いているものを閉じて、ドラッグ中の自動スクロールを始める。
-    pub(super) fn begin_selecting(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn begin_selecting(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // 全体のクリックで閉じる処理（ルート要素）には、渡さない。
         cx.stop_propagation();
         self.popup = None;

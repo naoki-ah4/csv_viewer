@@ -67,8 +67,16 @@ mod tests {
     fn a_row_outside_the_view_is_brought_in_with_some_rows_above_it() {
         let scroll = pos(100, 7.0);
         assert_eq!(reveal_row(scroll, 101..120, 5_000, 3), pos(4_997, 0.0));
-        assert_eq!(reveal_row(scroll, 101..120, 120, 3), pos(117, 0.0), "just past the end");
-        assert_eq!(reveal_row(scroll, 101..120, 100, 3), pos(97, 0.0), "the half-hidden first row");
+        assert_eq!(
+            reveal_row(scroll, 101..120, 120, 3),
+            pos(117, 0.0),
+            "just past the end"
+        );
+        assert_eq!(
+            reveal_row(scroll, 101..120, 100, 3),
+            pos(97, 0.0),
+            "the half-hidden first row"
+        );
     }
 
     #[test]
@@ -80,7 +88,11 @@ mod tests {
     #[test]
     fn a_visible_column_does_not_move_the_view() {
         assert_eq!(reveal_column(100.0, 400.0, 150.0, 250.0, 1_000.0), 100.0);
-        assert_eq!(reveal_column(100.0, 400.0, 100.0, 500.0, 1_000.0), 100.0, "exactly fits");
+        assert_eq!(
+            reveal_column(100.0, 400.0, 100.0, 500.0, 1_000.0),
+            100.0,
+            "exactly fits"
+        );
     }
 
     #[test]
@@ -102,6 +114,10 @@ mod tests {
     fn the_result_stays_within_the_scrollable_range() {
         assert_eq!(reveal_column(0.0, 400.0, 900.0, 1_000.0, 450.0), 450.0);
         assert_eq!(reveal_column(50.0, 400.0, 0.0, 100.0, 450.0), 0.0);
-        assert_eq!(reveal_column(0.0, 400.0, 900.0, 1_000.0, 0.0), 0.0, "nothing to scroll");
+        assert_eq!(
+            reveal_column(0.0, 400.0, 900.0, 1_000.0, 0.0),
+            0.0,
+            "nothing to scroll"
+        );
     }
 }

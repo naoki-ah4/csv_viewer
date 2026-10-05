@@ -23,7 +23,11 @@ impl Viewer {
     ) {
         // 全体のクリックで閉じる処理（ルート要素）には、渡さない。
         cx.stop_propagation();
-        if self.popup.as_ref().is_some_and(|p| p.row == row && p.col == col) {
+        if self
+            .popup
+            .as_ref()
+            .is_some_and(|p| p.row == row && p.col == col)
+        {
             self.popup = None;
             cx.notify();
             return;
@@ -104,7 +108,11 @@ impl Viewer {
     }
 
     /// クリックしたセルの全文。表の上に重ねて出す。
-    pub(super) fn render_popup(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    pub(super) fn render_popup(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let popup = self.popup.as_ref()?;
         let window_size = window.viewport_size();
         let (x, y) = cell_popup::place(
@@ -154,12 +162,7 @@ impl Viewer {
                 .border_color(rgb(0xaaaaaa))
                 .rounded_md()
                 .shadow_lg()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x888888))
-                        .child(title),
-                )
+                .child(div().text_xs().text_color(rgb(0x888888)).child(title))
                 .child(
                     div()
                         .id("cell-popup-body")
@@ -188,9 +191,9 @@ impl Viewer {
                         )
                         .child(text),
                 )
-                .children(truncated.map(|note| {
-                    div().text_xs().text_color(rgb(0xb06000)).child(note)
-                })),
+                .children(
+                    truncated.map(|note| div().text_xs().text_color(rgb(0xb06000)).child(note)),
+                ),
         )
     }
 
@@ -245,7 +248,11 @@ impl Viewer {
                                 this.reopen_with_encoding(target, window, cx);
                             }),
                         )
-                        .child(format!("{} {}", if active { "✓" } else { "  " }, choice.label))
+                        .child(format!(
+                            "{} {}",
+                            if active { "✓" } else { "  " },
+                            choice.label
+                        ))
                 })),
         )
     }

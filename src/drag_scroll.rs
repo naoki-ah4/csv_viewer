@@ -73,15 +73,24 @@ mod tests {
 
     #[test]
     fn outside_the_area_it_scrolls_toward_the_pointer() {
-        assert!(edge_scroll(-10.0, 0.0, 100.0) < 0.0, "above / left scrolls back");
-        assert!(edge_scroll(130.0, 0.0, 100.0) > 0.0, "below / right scrolls forward");
+        assert!(
+            edge_scroll(-10.0, 0.0, 100.0) < 0.0,
+            "above / left scrolls back"
+        );
+        assert!(
+            edge_scroll(130.0, 0.0, 100.0) > 0.0,
+            "below / right scrolls forward"
+        );
     }
 
     #[test]
     fn it_speeds_up_with_distance_within_limits() {
         let near = edge_scroll(105.0, 0.0, 100.0);
         let far = edge_scroll(300.0, 0.0, 100.0);
-        assert_eq!(near, MIN_SPEED, "just outside still moves at a minimum speed");
+        assert_eq!(
+            near, MIN_SPEED,
+            "just outside still moves at a minimum speed"
+        );
         assert!(far > near);
         assert_eq!(edge_scroll(100_000.0, 0.0, 100.0), MAX_SPEED);
         assert_eq!(edge_scroll(-100_000.0, 0.0, 100.0), -MAX_SPEED);
@@ -90,7 +99,11 @@ mod tests {
     #[test]
     fn clamping_puts_the_pointer_on_an_edge_cell() {
         assert_eq!(clamp_into(-50.0, 10.0, 110.0), 10.0);
-        assert_eq!(clamp_into(500.0, 10.0, 110.0), 109.0, "the last pixel inside");
+        assert_eq!(
+            clamp_into(500.0, 10.0, 110.0),
+            109.0,
+            "the last pixel inside"
+        );
         assert_eq!(clamp_into(60.0, 10.0, 110.0), 60.0);
         assert_eq!(clamp_into(5.0, 10.0, 10.0), 10.0, "an empty area");
     }
@@ -100,7 +113,11 @@ mod tests {
         // 先頭の行（120行目）が、5px はみ出している。行の高さは24px。
         let at = |y: f32| row_at(y, 100.0, 120, 5.0, 24.0, 1000);
         assert_eq!(at(100.0), Some(120));
-        assert_eq!(at(118.0), Some(120), "the visible part of the first row ends at 119");
+        assert_eq!(
+            at(118.0),
+            Some(120),
+            "the visible part of the first row ends at 119"
+        );
         assert_eq!(at(119.0), Some(121));
         assert_eq!(at(100.0 + 24.0 * 3.0), Some(123));
     }

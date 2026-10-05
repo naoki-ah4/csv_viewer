@@ -340,7 +340,9 @@ mod tests {
         let right = down.extended_by(Step::Right, 100, 10);
         assert_eq!(right.dimensions(100, 10), (2, 2));
         // 戻すと、範囲が縮む。アンカーの位置を、越えて動かすと、反対側へ広がる。
-        let back = right.extended_by(Step::Up, 100, 10).extended_by(Step::Left, 100, 10);
+        let back = right
+            .extended_by(Step::Up, 100, 10)
+            .extended_by(Step::Left, 100, 10);
         assert!(back.is_single_cell(100, 10));
         let past = back.extended_by(Step::Up, 100, 10);
         assert_eq!(past.rows(100), 4..=5);
@@ -354,15 +356,24 @@ mod tests {
         let far = Selection::cell(pos(9, 3));
         assert_eq!(far.extended_by(Step::Down, 10, 4).head(), pos(9, 3));
         assert_eq!(far.extended_by(Step::Right, 10, 4).head(), pos(9, 3));
-        assert_eq!(corner.extended_by(Step::PageDown(1000), 10, 4).head(), pos(9, 0));
+        assert_eq!(
+            corner.extended_by(Step::PageDown(1000), 10, 4).head(),
+            pos(9, 0)
+        );
         assert_eq!(far.extended_by(Step::PageUp(1000), 10, 4).head(), pos(0, 3));
     }
 
     #[test]
     fn paging_and_jumping_move_by_rows() {
         let sel = Selection::cell(pos(50, 2));
-        assert_eq!(sel.extended_by(Step::PageDown(20), 1000, 5).head(), pos(70, 2));
-        assert_eq!(sel.extended_by(Step::PageUp(20), 1000, 5).head(), pos(30, 2));
+        assert_eq!(
+            sel.extended_by(Step::PageDown(20), 1000, 5).head(),
+            pos(70, 2)
+        );
+        assert_eq!(
+            sel.extended_by(Step::PageUp(20), 1000, 5).head(),
+            pos(30, 2)
+        );
         assert_eq!(sel.extended_by(Step::Top, 1000, 5).head(), pos(0, 2));
         assert_eq!(sel.extended_by(Step::Bottom, 1000, 5).head(), pos(999, 2));
     }
@@ -446,7 +457,10 @@ mod tests {
         let far = Selection::cell(pos(9, 3));
         assert_eq!(far.moved_by(Step::Down, 10, 4).head(), pos(9, 3));
         assert_eq!(far.moved_by(Step::Right, 10, 4).head(), pos(9, 3));
-        assert_eq!(corner.moved_by(Step::PageDown(1000), 10, 4).head(), pos(9, 0));
+        assert_eq!(
+            corner.moved_by(Step::PageDown(1000), 10, 4).head(),
+            pos(9, 0)
+        );
     }
 
     #[test]
@@ -456,7 +470,11 @@ mod tests {
         assert!(down.is_single_cell(100, 10));
         assert_eq!(down.head(), pos(6, 0));
         let right = row.moved_by(Step::Right, 100, 10);
-        assert_eq!(right.head(), pos(5, 1), "a whole row can move sideways once collapsed");
+        assert_eq!(
+            right.head(),
+            pos(5, 1),
+            "a whole row can move sideways once collapsed"
+        );
         let column = Selection::whole_column(3);
         assert_eq!(column.moved_by(Step::Down, 100, 10).head(), pos(1, 3));
         assert_eq!(column.moved_by(Step::Right, 100, 10).head(), pos(0, 4));
@@ -495,4 +513,3 @@ mod tests {
         assert_eq!(column.extended_by(Step::Last, 100, 6).cols(6), 3..=5);
     }
 }
-

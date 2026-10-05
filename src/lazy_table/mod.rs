@@ -17,11 +17,11 @@ use std::sync::{Arc, Mutex};
 use encoding_rs::Encoding;
 
 use crate::csv_data::{classify_from, find_first_non_ascii};
+use crate::matcher::{Direction, Matcher, Outcome};
 use crate::record_index::{
-    Byte, Record, RecordIndex, Scanner, STRIDE, Unit, Utf16Be, Utf16Le, aligned_end,
+    Byte, Record, RecordIndex, STRIDE, Scanner, Unit, Utf16Be, Utf16Le, aligned_end,
     locate_in_block, record_containing,
 };
-use crate::matcher::{Direction, Matcher, Outcome};
 
 mod index_job;
 mod searcher;

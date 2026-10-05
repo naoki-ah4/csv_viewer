@@ -12,10 +12,18 @@ pub(super) struct VisibleRows {
 
 /// スクロール位置から、描く行を求める。範囲外の位置は範囲内に丸める。
 /// `offset` は、先頭行の中でのずれそのもの（0以上、行の高さ未満）。
-pub(super) fn visible_rows(scroll: ScrollPos, viewport_height: f32, row_count: usize) -> VisibleRows {
+pub(super) fn visible_rows(
+    scroll: ScrollPos,
+    viewport_height: f32,
+    row_count: usize,
+) -> VisibleRows {
     let scroll = scroll.clamped(ScrollPos::max(row_count, viewport_height));
     let first = scroll.row.min(row_count);
-    let offset = if scroll.row >= row_count { 0.0 } else { scroll.offset };
+    let offset = if scroll.row >= row_count {
+        0.0
+    } else {
+        scroll.offset
+    };
     // 先頭の行がはみ出しているぶん、領域の高さを覆うには1行多く要る。
     let count = (viewport_height / ROW_HEIGHT).ceil() as usize + 1;
     VisibleRows {
@@ -99,7 +107,11 @@ mod tests {
     fn visible_rows_at_the_top() {
         assert_eq!(
             visible_rows(ScrollPos::TOP, 100.0, 1000),
-            VisibleRows { first: 0, last: 6, offset: 0.0 }
+            VisibleRows {
+                first: 0,
+                last: 6,
+                offset: 0.0
+            }
         );
     }
 
@@ -107,7 +119,11 @@ mod tests {
     fn visible_rows_with_an_offset_into_the_first_row() {
         assert_eq!(
             visible_rows(pos(2, 2.0), 100.0, 1000),
-            VisibleRows { first: 2, last: 8, offset: 2.0 }
+            VisibleRows {
+                first: 2,
+                last: 8,
+                offset: 2.0
+            }
         );
     }
 
@@ -119,7 +135,11 @@ mod tests {
         assert!(v.first < 10);
         assert_eq!(
             visible_rows(ScrollPos::TOP, 100.0, 0),
-            VisibleRows { first: 0, last: 0, offset: 0.0 }
+            VisibleRows {
+                first: 0,
+                last: 0,
+                offset: 0.0
+            }
         );
     }
 
@@ -190,5 +210,4 @@ mod tests {
             "eight digits"
         );
     }
-
 }

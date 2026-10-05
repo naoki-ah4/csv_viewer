@@ -15,7 +15,11 @@ fn assert_same_as_eager(bytes: &[u8], chunk: usize, label: &str) {
     assert_eq!(lazy.status(), IndexStatus::Done, "{label}");
     assert_eq!(lazy.encoding(), eager.encoding, "{label}: encoding");
     assert_eq!(lazy.row_count(), eager.row_count(), "{label}: row_count");
-    assert_eq!(lazy.column_count(), eager.column_count(), "{label}: column_count");
+    assert_eq!(
+        lazy.column_count(),
+        eager.column_count(),
+        "{label}: column_count"
+    );
     let cols = eager.column_count() + 1;
     for c in 0..cols {
         assert_eq!(lazy.header(c), eager.header(c), "{label}: header {c}");
@@ -158,7 +162,9 @@ fn cancel_stops_indexing_and_keeps_what_was_indexed() {
 #[test]
 fn iso_2022_jp_is_reported_as_unsupported() {
     let mut bytes = b"a,b\n1,".to_vec();
-    bytes.extend_from_slice(&[0x1B, 0x24, 0x42, 0x46, 0x7C, 0x4B, 0x5C, 0x38, 0x6C, 0x1B, 0x28, 0x42]);
+    bytes.extend_from_slice(&[
+        0x1B, 0x24, 0x42, 0x46, 0x7C, 0x4B, 0x5C, 0x38, 0x6C, 0x1B, 0x28, 0x42,
+    ]);
     bytes.push(b'\n');
     let (table, mut job) = LazyTable::open(Arc::new(bytes.clone()), None);
     job.run(&AtomicBool::new(false));
@@ -202,7 +208,11 @@ fn matches_eager_on_random_inputs() {
         seed
     };
     for round in 0..1500 {
-        let len = if round % 60 == 0 { 700 } else { (next() % 40) as usize };
+        let len = if round % 60 == 0 {
+            700
+        } else {
+            (next() % 40) as usize
+        };
         let text: String = (0..len)
             .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
             .collect();
@@ -222,8 +232,14 @@ fn the_first_step_is_small_and_later_steps_use_the_given_chunk() {
 
     assert!(job.step(CHUNK));
     assert_eq!(table.progress().0, FIRST_CHUNK, "first step is capped");
-    assert!(table.row_count() > 0, "rows are readable right after the first step");
+    assert!(
+        table.row_count() > 0,
+        "rows are readable right after the first step"
+    );
 
     assert!(job.step(CHUNK));
-    assert!(table.progress().0 > FIRST_CHUNK * 2, "later steps use the full chunk");
+    assert!(
+        table.progress().0 > FIRST_CHUNK * 2,
+        "later steps use the full chunk"
+    );
 }

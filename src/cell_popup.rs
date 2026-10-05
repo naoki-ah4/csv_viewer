@@ -47,7 +47,11 @@ mod tests {
     fn short_text_is_kept_whole() {
         assert_eq!(truncate_chars("abc", 10), ("abc".to_string(), 3));
         assert_eq!(truncate_chars("", 10), (String::new(), 0));
-        assert_eq!(truncate_chars("abc", 3), ("abc".to_string(), 3), "exactly at the limit");
+        assert_eq!(
+            truncate_chars("abc", 3),
+            ("abc".to_string(), 3),
+            "exactly at the limit"
+        );
     }
 
     #[test]
@@ -97,19 +101,27 @@ mod tests {
 
     #[test]
     fn a_popup_larger_than_the_window_sticks_to_the_top_left() {
-        assert_eq!(place((300.0, 300.0), (200.0, 100.0), (WIDTH, MAX_HEIGHT)), (8.0, 8.0));
+        assert_eq!(
+            place((300.0, 300.0), (200.0, 100.0), (WIDTH, MAX_HEIGHT)),
+            (8.0, 8.0)
+        );
     }
 
     #[test]
     fn a_menu_above_the_click_sits_over_it_and_stays_inside_the_window() {
         let window = (900.0, 600.0);
         let size = (200.0, 150.0);
-        assert_eq!(place_above((300.0, 580.0), window, size), (300.0, 580.0 - 150.0 - 8.0));
+        assert_eq!(
+            place_above((300.0, 580.0), window, size),
+            (300.0, 580.0 - 150.0 - 8.0)
+        );
         // 右端に近いクリックは、右にはみ出さない。
-        assert_eq!(place_above((890.0, 580.0), window, size).0, 900.0 - 200.0 - 8.0);
+        assert_eq!(
+            place_above((890.0, 580.0), window, size).0,
+            900.0 - 200.0 - 8.0
+        );
         // 上に十分な余白がないときは、上端に寄せる。
         assert_eq!(place_above((300.0, 100.0), window, size).1, 8.0);
         assert_eq!(place_above((-5.0, 580.0), window, size).0, 8.0);
     }
 }
-

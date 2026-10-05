@@ -8,7 +8,7 @@ use encoding_rs::Encoding;
 use memmap2::Mmap;
 
 use crate::csv_data::CsvTable;
-use crate::lazy_table::{IndexJob, IndexStatus, LazyTable, LazySearcher};
+use crate::lazy_table::{IndexJob, IndexStatus, LazySearcher, LazyTable};
 use crate::matcher::{Direction, Matcher, Outcome};
 use crate::search;
 
@@ -244,7 +244,11 @@ mod tests {
             if let Some(mut job) = job {
                 job.run(&AtomicBool::new(false));
             }
-            assert_eq!(right.encoding(), encoding_rs::SHIFT_JIS, "threshold {threshold}");
+            assert_eq!(
+                right.encoding(),
+                encoding_rs::SHIFT_JIS,
+                "threshold {threshold}"
+            );
             assert_eq!(right.cell(0, 1), "山田太郎", "threshold {threshold}");
 
             // 間違った文字コードを指定すると、その文字コードで読んで、文字化けになる。
@@ -253,9 +257,12 @@ mod tests {
             if let Some(mut job) = job {
                 job.run(&AtomicBool::new(false));
             }
-            assert_eq!(wrong.encoding(), encoding_rs::UTF_8, "threshold {threshold}");
+            assert_eq!(
+                wrong.encoding(),
+                encoding_rs::UTF_8,
+                "threshold {threshold}"
+            );
             assert_ne!(wrong.cell(0, 1), "山田太郎", "threshold {threshold}");
         }
     }
 }
-

@@ -159,10 +159,22 @@ mod tests {
     fn max_aligns_the_last_row_with_the_bottom_edge() {
         // 10行（240px）を高さ100pxの領域で見る。位置は 240 - 100 = 140px。
         let max = ScrollPos::max(10, 100.0);
-        assert_eq!(max, ScrollPos { row: 5, offset: 20.0 });
+        assert_eq!(
+            max,
+            ScrollPos {
+                row: 5,
+                offset: 20.0
+            }
+        );
         assert_eq!(px_of(max), 140.0);
         // 領域の高さが行の高さの整数倍のとき。240 - 96 = 144px。
-        assert_eq!(ScrollPos::max(10, 96.0), ScrollPos { row: 6, offset: 0.0 });
+        assert_eq!(
+            ScrollPos::max(10, 96.0),
+            ScrollPos {
+                row: 6,
+                offset: 0.0
+            }
+        );
     }
 
     #[test]
@@ -170,25 +182,52 @@ mod tests {
         assert_eq!(ScrollPos::max(0, 600.0), ScrollPos::TOP);
         assert_eq!(ScrollPos::max(5, 600.0), ScrollPos::TOP);
         assert_eq!(ScrollPos::max(25, 600.0), ScrollPos::TOP); // ちょうど収まる
-        assert_eq!(ScrollPos::max(10, 0.0), ScrollPos { row: 10, offset: 0.0 });
+        assert_eq!(
+            ScrollPos::max(10, 0.0),
+            ScrollPos {
+                row: 10,
+                offset: 0.0
+            }
+        );
     }
 
     #[test]
     fn scrolled_by_carries_into_the_row_number() {
         assert_eq!(
             ScrollPos::TOP.scrolled_by(50.0),
-            ScrollPos { row: 2, offset: 2.0 }
+            ScrollPos {
+                row: 2,
+                offset: 2.0
+            }
         );
-        let pos = ScrollPos { row: 2, offset: 2.0 };
-        assert_eq!(pos.scrolled_by(-26.0), ScrollPos { row: 1, offset: 0.0 });
-        assert_eq!(pos.scrolled_by(-1.0), ScrollPos { row: 2, offset: 1.0 });
+        let pos = ScrollPos {
+            row: 2,
+            offset: 2.0,
+        };
+        assert_eq!(
+            pos.scrolled_by(-26.0),
+            ScrollPos {
+                row: 1,
+                offset: 0.0
+            }
+        );
+        assert_eq!(
+            pos.scrolled_by(-1.0),
+            ScrollPos {
+                row: 2,
+                offset: 1.0
+            }
+        );
     }
 
     #[test]
     fn scrolled_by_never_goes_above_the_top() {
         assert_eq!(ScrollPos::TOP.scrolled_by(-1.0), ScrollPos::TOP);
         assert_eq!(ScrollPos::TOP.scrolled_by(-1e12), ScrollPos::TOP);
-        let pos = ScrollPos { row: 3, offset: 5.0 };
+        let pos = ScrollPos {
+            row: 3,
+            offset: 5.0,
+        };
         assert_eq!(pos.scrolled_by(-1e9), ScrollPos::TOP);
     }
 
@@ -196,7 +235,10 @@ mod tests {
     fn clamped_stops_at_the_maximum() {
         let max = ScrollPos::max(100, 600.0);
         assert_eq!(ScrollPos::TOP.scrolled_by(1e9).clamped(max), max);
-        let inside = ScrollPos { row: 3, offset: 1.0 };
+        let inside = ScrollPos {
+            row: 3,
+            offset: 1.0,
+        };
         assert_eq!(inside.clamped(max), inside);
     }
 
@@ -220,7 +262,10 @@ mod tests {
 
     #[test]
     fn carry_stays_exact_for_large_row_numbers() {
-        let pos = ScrollPos { row: 30_466_000, offset: 0.0 };
+        let pos = ScrollPos {
+            row: 30_466_000,
+            offset: 0.0,
+        };
         let moved = pos.scrolled_by(H * 333.0 + 5.0);
         assert_eq!(moved.row, 30_466_333);
         assert!((moved.offset - 5.0).abs() < 1e-3);
@@ -235,7 +280,10 @@ mod tests {
             seed ^= seed << 17;
             seed
         };
-        let mut pos = ScrollPos { row: 1_000_000, offset: 3.0 };
+        let mut pos = ScrollPos {
+            row: 1_000_000,
+            offset: 3.0,
+        };
         for _ in 0..100_000 {
             let delta = (next() % 20_001) as f64 / 10.0 - 1_000.0; // -1000.0〜+1000.0 px
             pos = pos.scrolled_by(delta);
@@ -245,13 +293,20 @@ mod tests {
 
     #[test]
     fn fraction_and_from_fraction_round_trip() {
-        for (rows, viewport) in [(30_466_333usize, 700.0f32), (100, 600.0), (5_000_000_000_000, 2160.0)] {
+        for (rows, viewport) in [
+            (30_466_333usize, 700.0f32),
+            (100, 600.0),
+            (5_000_000_000_000, 2160.0),
+        ] {
             let max = ScrollPos::max(rows, viewport);
             for fraction in [0.0, 0.25, 0.5, 0.999_999, 1.0] {
                 let pos = ScrollPos::from_fraction(fraction, max);
                 assert!(pos <= max);
                 let back = pos.fraction(max);
-                assert!((back - fraction).abs() < 1e-9, "{rows} rows, {fraction}: {back}");
+                assert!(
+                    (back - fraction).abs() < 1e-9,
+                    "{rows} rows, {fraction}: {back}"
+                );
             }
             assert_eq!(ScrollPos::from_fraction(1.0, max), max);
             assert_eq!(ScrollPos::from_fraction(0.0, max), ScrollPos::TOP);
@@ -289,12 +344,22 @@ mod tests {
         // ホイールで行の途中に止まっていても、キーで動かすと、行の境界にそろう。
         let mid = pos(10, 5.5);
         assert_eq!(nav(mid, Nav::LineDown), pos(11, 0.0));
-        assert_eq!(nav(mid, Nav::LineUp), pos(10, 0.0), "up returns to the row start first");
+        assert_eq!(
+            nav(mid, Nav::LineUp),
+            pos(10, 0.0),
+            "up returns to the row start first"
+        );
         assert_eq!(nav(pos(10, 0.0), Nav::LineUp), pos(9, 0.0));
         assert_eq!(nav(mid, Nav::PageDown), pos(38, 0.0));
         assert_eq!(nav(mid, Nav::PageUp), pos(0, 0.0));
         // どの結果も、行の境界にそろっている。
-        for n in [Nav::LineUp, Nav::LineDown, Nav::PageUp, Nav::PageDown, Nav::Top] {
+        for n in [
+            Nav::LineUp,
+            Nav::LineDown,
+            Nav::PageUp,
+            Nav::PageDown,
+            Nav::Top,
+        ] {
             assert_eq!(nav(mid, n).offset, 0.0, "{n:?}");
         }
     }
@@ -319,10 +384,19 @@ mod tests {
         let max = ScrollPos::max(100, 600.0);
         assert_eq!(max.navigated(Nav::LineDown, max, 600.0), max);
         assert_eq!(max.navigated(Nav::PageDown, max, 600.0), max);
-        assert_eq!(ScrollPos::TOP.navigated(Nav::PageUp, max, 600.0), ScrollPos::TOP);
+        assert_eq!(
+            ScrollPos::TOP.navigated(Nav::PageUp, max, 600.0),
+            ScrollPos::TOP
+        );
         // 全体が収まるなら、どこへも動かない。
         let tiny = ScrollPos::max(3, 600.0);
-        for n in [Nav::LineDown, Nav::PageDown, Nav::Bottom, Nav::Top, Nav::LineUp] {
+        for n in [
+            Nav::LineDown,
+            Nav::PageDown,
+            Nav::Bottom,
+            Nav::Top,
+            Nav::LineUp,
+        ] {
             assert_eq!(ScrollPos::TOP.navigated(n, tiny, 600.0), ScrollPos::TOP);
         }
     }
@@ -331,7 +405,13 @@ mod tests {
     fn a_tiny_viewport_still_pages_by_at_least_one_row() {
         let max = ScrollPos::max(100, 10.0);
         let moved = ScrollPos::TOP.navigated(Nav::PageDown, max, 10.0);
-        assert_eq!(moved, ScrollPos { row: 1, offset: 0.0 });
+        assert_eq!(
+            moved,
+            ScrollPos {
+                row: 1,
+                offset: 0.0
+            }
+        );
     }
 
     #[test]
@@ -344,4 +424,3 @@ mod tests {
         assert_eq!(page_rows(-5.0), 1);
     }
 }
-

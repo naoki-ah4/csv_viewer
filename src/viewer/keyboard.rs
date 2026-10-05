@@ -15,7 +15,8 @@ impl Viewer {
     pub(super) fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(input) = self.goto.as_mut() else {
             let modifiers = &event.keystroke.modifiers;
-            let plain = !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.shift);
+            let plain =
+                !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.shift);
             match event.keystroke.key.as_str() {
                 // `Esc`：開いているものを閉じる。何も開いていなければ、選択を解く。
                 "escape" => {
@@ -43,7 +44,11 @@ impl Viewer {
         let modifiers = &keystroke.modifiers;
         let has_command_modifier =
             modifiers.control || modifiers.alt || modifiers.platform || modifiers.function;
-        match goto::classify(&keystroke.key, keystroke.key_char.as_deref(), has_command_modifier) {
+        match goto::classify(
+            &keystroke.key,
+            keystroke.key_char.as_deref(),
+            has_command_modifier,
+        ) {
             GotoKey::Digit(digit) => input.push_digit(digit),
             GotoKey::Backspace => input.backspace(),
             GotoKey::Escape => self.goto = None,
@@ -82,11 +87,7 @@ impl Viewer {
             .loaded
             .as_ref()
             .is_some_and(|l| l.table.indexing_percent().is_some());
-        let range = format!(
-            "1〜{}{}",
-            self.row_count(),
-            if indexing { "+" } else { "" }
-        );
+        let range = format!("1〜{}{}", self.row_count(), if indexing { "+" } else { "" });
         Some(
             div()
                 .absolute()

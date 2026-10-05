@@ -290,8 +290,8 @@ impl Viewer {
 
 #[cfg(test)]
 mod tests {
-    use crate::csv_data;
     use super::*;
+    use crate::csv_data;
     use crate::lazy_table::LazyTable;
 
     fn lazy(text: &str) -> (Loaded, IndexJob) {
@@ -320,7 +320,10 @@ mod tests {
         // 最終的な列幅は、全行を見た場合と同じ。
         let (expected, _) = column_widths(&loaded.table);
         assert_eq!(loaded.col_widths, expected);
-        assert!(!loaded.refresh_widths(), "nothing changes after indexing is done");
+        assert!(
+            !loaded.refresh_widths(),
+            "nothing changes after indexing is done"
+        );
     }
 
     #[test]
@@ -341,5 +344,4 @@ mod tests {
         let mut loaded = Loaded::new(table);
         assert!(!loaded.refresh_widths());
     }
-
 }

@@ -174,7 +174,11 @@ mod tests {
         for _ in 0..10 {
             input.backspace();
         }
-        assert_eq!(input.value(), None, "backspace on an empty input is harmless");
+        assert_eq!(
+            input.value(),
+            None,
+            "backspace on an empty input is harmless"
+        );
     }
 
     #[test]
@@ -198,9 +202,27 @@ mod tests {
 
     #[test]
     fn a_row_inside_the_range_moves_there_without_a_notice() {
-        assert_eq!(resolve(1, 100, false), Resolved { row: 0, notice: None });
-        assert_eq!(resolve(50, 100, false), Resolved { row: 49, notice: None });
-        assert_eq!(resolve(100, 100, false), Resolved { row: 99, notice: None });
+        assert_eq!(
+            resolve(1, 100, false),
+            Resolved {
+                row: 0,
+                notice: None
+            }
+        );
+        assert_eq!(
+            resolve(50, 100, false),
+            Resolved {
+                row: 49,
+                notice: None
+            }
+        );
+        assert_eq!(
+            resolve(100, 100, false),
+            Resolved {
+                row: 99,
+                notice: None
+            }
+        );
     }
 
     #[test]
@@ -216,9 +238,18 @@ mod tests {
         let r = resolve(5_000_000, 1_200, true);
         assert_eq!(r.row, 1_199);
         let notice = r.notice.unwrap();
-        assert!(notice.contains("索引作成中") && notice.contains("1200"), "{notice}");
+        assert!(
+            notice.contains("索引作成中") && notice.contains("1200"),
+            "{notice}"
+        );
         // 索引ができている範囲なら、索引作成中でも、そのまま移動できる。
-        assert_eq!(resolve(1_000, 1_200, true), Resolved { row: 999, notice: None });
+        assert_eq!(
+            resolve(1_000, 1_200, true),
+            Resolved {
+                row: 999,
+                notice: None
+            }
+        );
     }
 
     #[test]

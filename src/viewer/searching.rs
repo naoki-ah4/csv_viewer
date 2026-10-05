@@ -89,10 +89,7 @@ impl Viewer {
             count: None,
             busy: false,
         });
-        let columns = self
-            .loaded
-            .as_ref()
-            .map_or(0, |l| l.table.column_count());
+        let columns = self.loaded.as_ref().map_or(0, |l| l.table.column_count());
         // 「今の一致の1つ前から」前向きに探すと、今の一致自身も、探す対象に入る。
         let start = match kept {
             Some(current) => current.previous_cell(columns),
@@ -111,7 +108,12 @@ impl Viewer {
     }
 
     /// 次（または前）の一致へ。一致がまだなければ、画面の先頭から探す。
-    pub(super) fn search_step(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn search_step(
+        &mut self,
+        dir: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.search_state.as_ref() else {
             return;
         };
@@ -147,7 +149,8 @@ impl Viewer {
         let can_wrap = start.is_some();
 
         // まず、同じ行の中の、隣のセルを調べる（どちらの方式でも、すぐ終わる）。
-        if let Some(found) = start.and_then(|m| search::same_row_step(table, &state.matcher, m, dir))
+        if let Some(found) =
+            start.and_then(|m| search::same_row_step(table, &state.matcher, m, dir))
         {
             state.busy = false;
             self.apply_search(Outcome::Found(found), false, dir, cx);
@@ -158,9 +161,10 @@ impl Viewer {
             None => {
                 let outcome = search::find_match(table, &state.matcher, start, dir, &flag);
                 let (outcome, wrapped) = match outcome {
-                    Outcome::NotFound if can_wrap => {
-                        (search::find_match(table, &state.matcher, None, dir, &flag), true)
-                    }
+                    Outcome::NotFound if can_wrap => (
+                        search::find_match(table, &state.matcher, None, dir, &flag),
+                        true,
+                    ),
                     other => (other, false),
                 };
                 state.busy = false;
@@ -293,11 +297,11 @@ impl Viewer {
         };
         match loaded.table.lazy_searcher() {
             None => {
-                state.count = match search::count_rows(&loaded.table, &state.matcher, COUNT_CAP, &flag)
-                {
-                    Outcome::Found(counted) => Some(counted),
-                    _ => None,
-                };
+                state.count =
+                    match search::count_rows(&loaded.table, &state.matcher, COUNT_CAP, &flag) {
+                        Outcome::Found(counted) => Some(counted),
+                        _ => None,
+                    };
             }
             Some(searcher) => {
                 let needle = state.needle.clone();
@@ -428,15 +432,33 @@ mod tests {
     #[test]
     fn the_search_info_text_covers_each_state() {
         // 検索中は、ほかの情報より、検索中であることを優先する。
-        assert_eq!(search_info_text(true, Some((5, false)), false, Some(2)), "検索中…");
+        assert_eq!(
+            search_info_text(true, Some((5, false)), false, Some(2)),
+            "検索中…"
+        );
         // 一致が0行で、索引も作りおわっているなら、見つからない。
-        assert_eq!(search_info_text(false, Some((0, false)), false, None), "見つかりません");
+        assert_eq!(
+            search_info_text(false, Some((0, false)), false, None),
+            "見つかりません"
+        );
         // 索引の作成中は、0行でも、この先に見つかるかもしれない。
-        assert_eq!(search_info_text(false, Some((0, false)), true, None), "0+ 行が一致");
-        assert_eq!(search_info_text(false, Some((12, false)), false, None), "12 行が一致");
+        assert_eq!(
+            search_info_text(false, Some((0, false)), true, None),
+            "0+ 行が一致"
+        );
+        assert_eq!(
+            search_info_text(false, Some((12, false)), false, None),
+            "12 行が一致"
+        );
         // 上限で打ち切ったときと、索引の作成中は、「+」をつける。
-        assert_eq!(search_info_text(false, Some((100_000, true)), false, None), "100000+ 行が一致");
-        assert_eq!(search_info_text(false, Some((12, false)), true, None), "12+ 行が一致");
+        assert_eq!(
+            search_info_text(false, Some((100_000, true)), false, None),
+            "100000+ 行が一致"
+        );
+        assert_eq!(
+            search_info_text(false, Some((12, false)), true, None),
+            "12+ 行が一致"
+        );
         // 数えている途中。
         assert_eq!(search_info_text(false, None, false, None), "数えています…");
         // 現在の一致の行は、1始まりで添える。
@@ -449,5 +471,4 @@ mod tests {
             "数えています… / 現在 42 行目"
         );
     }
-
 }
