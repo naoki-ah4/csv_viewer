@@ -12,6 +12,9 @@ mod csv_data;
 #[path = "../src/lazy_table.rs"]
 #[allow(dead_code)]
 mod lazy_table;
+#[path = "../src/matcher.rs"]
+#[allow(dead_code)]
+mod matcher;
 #[path = "../src/record_index.rs"]
 #[allow(dead_code)]
 mod record_index;

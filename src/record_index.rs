@@ -250,6 +250,19 @@ impl RecordIndex {
         self.max_fields
     }
 
+    /// 位置 `offset` を含む（その位置を過ぎてから始まる最初の）レコードがあるブロック。
+    /// 戻り値は（ブロックの先頭レコードの番号、ブロックの先頭の位置）。索引が空なら `None`。
+    pub fn block_containing(&self, offset: usize) -> Option<(usize, usize)> {
+        if self.block_starts.is_empty() {
+            return None;
+        }
+        let block = self
+            .block_starts
+            .partition_point(|&start| start as usize <= offset)
+            .saturating_sub(1);
+        Some((block * STRIDE, self.block_starts[block] as usize))
+    }
+
     /// レコード `record` を含むブロックの先頭位置。レコード数の範囲外なら `None`。
     pub fn block_start(&self, record: usize) -> Option<usize> {
         (record < self.record_count).then(|| self.block_starts[record / STRIDE] as usize)
@@ -301,6 +314,39 @@ pub fn locate_in_block<U: Unit>(
     });
     if found.is_none() && seen == to_skip {
         found = scanner.finish(end).map(|r| r.start..r.end);
+    }
+    found
+}
+
+/// ブロックの先頭 `block_start`（先頭レコードの番号が `first_record`）から走査して、
+/// 終端が `offset` より後ろにある最初のレコードを返す。`offset` が、レコードの内側にあっても、
+/// レコードの間（終端記号や空行）にあっても、その位置以降の最初のレコードになる。
+/// 戻り値は（レコードの番号、バイト範囲）。
+pub fn record_containing<U: Unit>(
+    bytes: &[u8],
+    first_record: usize,
+    block_start: usize,
+    offset: usize,
+) -> Option<(usize, Range<usize>)> {
+    let end = aligned_end::<U>(bytes);
+    let mut skipped = 0;
+    let mut found = None;
+    let mut scanner = Scanner::new(block_start);
+    scanner.feed::<U>(bytes, block_start, end, &mut |r| {
+        if r.end > offset {
+            found = Some((first_record + skipped, r.start..r.end));
+            ControlFlow::Break(())
+        } else {
+            skipped += 1;
+            ControlFlow::Continue(())
+        }
+    });
+    if found.is_none() {
+        if let Some(r) = scanner.finish(end) {
+            if r.end > offset {
+                found = Some((first_record + skipped, r.start..r.end));
+            }
+        }
     }
     found
 }

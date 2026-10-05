@@ -2,12 +2,15 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use encoding_rs::Encoding;
 use memmap2::Mmap;
 
 use crate::csv_data::CsvTable;
-use crate::lazy_table::{IndexJob, IndexStatus, LazyTable};
+use crate::lazy_table::{IndexJob, IndexStatus, LazyTable, LazySearcher};
+use crate::matcher::{Direction, Matcher, Outcome};
+use crate::search;
 
 /// これ以上のサイズのファイルは、全体を読み込まず遅延読み込みで開く。
 ///
@@ -103,6 +106,29 @@ impl Table {
         match self {
             Self::Eager(t) => Cow::Borrowed(t.cell(row, col)),
             Self::Lazy(t) => t.cell(row, col),
+        }
+    }
+
+    /// `from_row` 以降（前向き）、または `from_row` より前（後ろ向き）で、最初に一致する行。
+    /// 遅延読み込みの表では、索引ができている範囲だけを調べる。
+    pub fn find_row(
+        &self,
+        matcher: &Matcher,
+        from_row: usize,
+        dir: Direction,
+        cancel: &AtomicBool,
+    ) -> Outcome<usize> {
+        match self {
+            Self::Eager(t) => search::find_row_in_csv(t, matcher, from_row, dir, cancel),
+            Self::Lazy(t) => t.searcher().find_row(matcher, from_row, dir, cancel),
+        }
+    }
+
+    /// 遅延読み込みの表を、別スレッドから検索する窓口。全読み込みなら `None`。
+    pub fn lazy_searcher(&self) -> Option<LazySearcher> {
+        match self {
+            Self::Eager(_) => None,
+            Self::Lazy(t) => Some(t.searcher()),
         }
     }
 

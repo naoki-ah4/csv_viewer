@@ -12,4 +12,6 @@ futures = { version = "0.3.34", default-features = false, features = ["std"] }
 gpui = "0.2.2"
 memchr = "2.8.3"
 memmap2 = "0.9.11"
+regex = { version = "1.13.1", default-features = false, features = ["std", "perf"] }
+unicode-segmentation = "1.13.3"
 url = "2.5.8"

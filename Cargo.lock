@@ -1280,6 +1280,8 @@ dependencies = [
  "gpui",
  "memchr",
  "memmap2",
+ "regex",
+ "unicode-segmentation",
  "url",
 ]
 
