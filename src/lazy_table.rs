@@ -6,7 +6,6 @@
 //! 索引の作成（`IndexJob`）は別スレッドで進められる。表は作成の途中でも読める。
 //! 文字コードは、最初の非ASCIIバイトが見つかった時点で判定する（それまでの行はASCIIだけで、
 //! どの文字コードでも同じに読めるため）。
-#![allow(dead_code)] // 振り分けの実装中。Table から使うようになったら外す。
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -54,7 +53,6 @@ struct EncodingState {
 
 struct Shared {
     data: Bytes,
-    body_start: usize,
     kind: UnitKind,
     index: Mutex<RecordIndex>,
     encoding: Mutex<EncodingState>,
@@ -112,7 +110,6 @@ impl LazyTable {
         };
         let shared = Arc::new(Shared {
             data,
-            body_start,
             kind,
             index: Mutex::new(RecordIndex::new()),
             encoding: Mutex::new(EncodingState { encoding, locked }),

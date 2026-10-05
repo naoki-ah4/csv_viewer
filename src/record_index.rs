@@ -11,7 +11,6 @@
 //!
 //! 全レコードの先頭位置は持たず、`STRIDE` レコードごとに1つだけ持つ（疎な索引）。
 //! 任意のレコードは、手前のブロックの先頭から最大 `STRIDE - 1` レコード走査して見つける。
-#![allow(dead_code)] // 遅延読み込みの実装中。LazyTable から使うようになったら外す。
 
 use std::ops::{ControlFlow, Range};
 
@@ -209,7 +208,8 @@ impl RecordIndex {
     }
 }
 
-/// `bytes[body_start..]` 全体を走査して索引を作る。
+/// `bytes[body_start..]` 全体を走査して索引を作る（テストで `csv` と突き合わせるための基準）。
+#[cfg(test)]
 pub fn build<U: Unit>(bytes: &[u8], body_start: usize) -> RecordIndex {
     let end = aligned_end::<U>(bytes);
     let mut index = RecordIndex::new();
@@ -225,6 +225,7 @@ pub fn build<U: Unit>(bytes: &[u8], body_start: usize) -> RecordIndex {
 }
 
 /// レコード `record`（0始まり、ヘッダーも1レコード）の `bytes` 上の範囲。
+#[cfg(test)]
 pub fn locate<U: Unit>(bytes: &[u8], index: &RecordIndex, record: usize) -> Option<Range<usize>> {
     let start = index.block_start(record)?;
     locate_in_block::<U>(bytes, start, record % STRIDE)

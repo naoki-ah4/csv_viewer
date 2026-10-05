@@ -5,6 +5,9 @@ mod scrollbar;
 mod table;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use gpui::{
     App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, Menu, MenuItem,
@@ -13,6 +16,7 @@ use gpui::{
     prelude::*, px, rgb, rgba, size, uniform_list,
 };
 
+use lazy_table::{IndexJob, IndexStatus};
 use scrollbar::{Axis, AxisState};
 use table::Table;
 
@@ -24,6 +28,10 @@ const MAX_COL_WIDTH: f32 = 400.0;
 const CHAR_WIDTH: f32 = 7.5;
 const CELL_PADDING: f32 = 16.0;
 const WIDTH_SAMPLE_ROWS: usize = 1000;
+/// 遅延読み込みの索引作成中に、画面を更新する間隔。
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// 遅延読み込みできない文字コードのとき、全読み込みで開き直してよい最大サイズ。
+const EAGER_FALLBACK_LIMIT: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct Drag {
@@ -35,6 +43,27 @@ struct Drag {
 struct Loaded {
     table: Table,
     col_widths: Vec<f32>,
+    /// 列幅の元にしたデータ行の数。
+    sampled_rows: usize,
+}
+
+impl Loaded {
+    fn new(table: Table) -> Self {
+        let (col_widths, sampled_rows) = column_widths(&table);
+        Self {
+            table,
+            col_widths,
+            sampled_rows,
+        }
+    }
+
+    /// 索引作成中は行や列が増えるので、列幅の元にした範囲が古くなったら計算し直す。
+    fn refresh_widths(&mut self) {
+        let rows = self.table.row_count().min(WIDTH_SAMPLE_ROWS);
+        if rows != self.sampled_rows || self.table.column_count() != self.col_widths.len() {
+            (self.col_widths, self.sampled_rows) = column_widths(&self.table);
+        }
+    }
 }
 
 struct Viewer {
@@ -45,6 +74,11 @@ struct Viewer {
     loading: Option<String>,
     /// 実行中の読み込み。保持している間だけ動き、drop するとキャンセルされる。
     load_task: Option<Task<()>>,
+    /// 遅延読み込みの索引作成。`cancel` を立てると、次のチャンクの前で止まる。
+    index_task: Option<Task<()>>,
+    cancel: Arc<AtomicBool>,
+    /// 索引作成中に、画面を定期的に更新するタスク。
+    poll_task: Option<Task<()>>,
     list_scroll: UniformListScrollHandle,
     h_scroll: ScrollHandle,
     drag: Option<Drag>,
@@ -58,6 +92,9 @@ impl Viewer {
             error: None,
             loading: None,
             load_task: None,
+            index_task: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            poll_task: None,
             list_scroll: UniformListScrollHandle::new(),
             h_scroll: ScrollHandle::new(),
             drag: None,
@@ -68,15 +105,29 @@ impl Viewer {
     /// CSVをバックグラウンドで読み込み、終わったら表示を差し替える。
     /// 読み込み中は直前の表示を残す。別のファイルを開くと、前の読み込みは破棄される。
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_with(path, false, window, cx);
+    }
+
+    /// `force_eager` なら、サイズに関わらず全体を読み込んで開く。
+    fn open_with(
+        &mut self,
+        path: PathBuf,
+        force_eager: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.loading = Some(file_name(&path));
         self.error = None;
 
         let load = cx.background_spawn({
             let path = path.clone();
             async move {
-                let table = Table::load(&path)?;
-                let col_widths = column_widths(&table);
-                anyhow::Ok(Loaded { table, col_widths })
+                let (table, job) = if force_eager {
+                    (Table::load_eager(&path)?, None)
+                } else {
+                    Table::open(&path)?
+                };
+                anyhow::Ok((Loaded::new(table), job))
             }
         });
         // 古い Task は代入時に drop され、キャンセルされる。
@@ -94,13 +145,14 @@ impl Viewer {
     fn finish_load(
         &mut self,
         path: &Path,
-        result: anyhow::Result<Loaded>,
+        result: anyhow::Result<(Loaded, Option<IndexJob>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.loading = None;
         match result {
-            Ok(loaded) => {
+            Ok((loaded, job)) => {
+                self.stop_indexing();
                 self.loaded = Some(loaded);
                 self.list_scroll
                     .0
@@ -109,12 +161,91 @@ impl Viewer {
                     .set_offset(point(px(0.), px(0.)));
                 self.h_scroll.set_offset(point(px(0.), px(0.)));
                 window.set_window_title(&file_name(path));
+                if let Some(job) = job {
+                    self.start_indexing(path.to_path_buf(), job, window, cx);
+                }
             }
             Err(e) => {
                 self.error = Some(format!("開けませんでした: {} ({e})", path.display()));
             }
         }
         cx.notify();
+    }
+
+    /// 動いている索引作成と画面更新を止める。
+    fn stop_indexing(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.index_task = None;
+        self.poll_task = None;
+    }
+
+    /// 索引作成をバックグラウンドで走らせ、終わるまで画面を定期的に更新する。
+    fn start_indexing(
+        &mut self,
+        path: PathBuf,
+        job: IndexJob,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = cancel.clone();
+        self.index_task = Some(cx.background_spawn(async move {
+            let mut job = job;
+            job.run(&cancel);
+        }));
+
+        let timer = cx.background_executor().clone();
+        self.poll_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                timer.timer(POLL_INTERVAL).await;
+                let keep_going = this
+                    .update_in(cx, |this, window, cx| this.poll_index(&path, window, cx))
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// 索引作成の途中経過を画面に反映する。続けて呼ぶ必要があれば `true`。
+    fn poll_index(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(loaded) = self.loaded.as_mut() else {
+            return false;
+        };
+        loaded.refresh_widths();
+        let status = loaded.table.index_status();
+        cx.notify();
+        match status {
+            Some(IndexStatus::Indexing) => true,
+            Some(IndexStatus::Unsupported(encoding)) => {
+                self.fall_back_to_eager(path, encoding, window, cx);
+                false
+            }
+            Some(IndexStatus::Done | IndexStatus::Cancelled) | None => false,
+        }
+    }
+
+    /// 遅延読み込みできない文字コード（ISO-2022-JP など）だったので、全読み込みで開き直す。
+    /// 巨大なファイルは、メモリを使い切らないよう断る。
+    fn fall_back_to_eager(
+        &mut self,
+        path: &Path,
+        encoding: &'static encoding_rs::Encoding,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX);
+        if size > EAGER_FALLBACK_LIMIT {
+            self.error = Some(format!(
+                "{} は文字コード {} のため、この大きさでは開けません",
+                file_name(path),
+                encoding.name()
+            ));
+            cx.notify();
+            return;
+        }
+        self.open_with(path.to_path_buf(), true, window, cx);
     }
 
     fn prompt_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -312,12 +443,20 @@ impl Viewer {
         let text = match (&self.error, &self.loading, &self.loaded) {
             (Some(error), _, _) => error.clone(),
             (None, Some(name), _) => format!("読み込み中… {name}"),
-            (None, None, Some(l)) => format!(
-                "{} 行 / {} 列 / {}",
-                l.table.row_count(),
-                l.col_widths.len(),
-                l.table.encoding().name()
-            ),
+            (None, None, Some(l)) => {
+                let percent = l.table.indexing_percent();
+                let mut text = format!(
+                    "{}{} 行 / {} 列 / {}",
+                    l.table.row_count(),
+                    if percent.is_some() { "+" } else { "" },
+                    l.table.column_count(),
+                    l.table.encoding().name()
+                );
+                if let Some(percent) = percent {
+                    text.push_str(&format!(" / 索引作成中 {percent}%"));
+                }
+                text
+            }
             (None, None, None) => String::new(),
         };
         div()
@@ -346,20 +485,22 @@ fn axis_value(axis: Axis, p: Point<Pixels>) -> Pixels {
 }
 
 /// 全角は半角の2倍幅として概算する。先頭の一部の行だけを見て列幅を決める。
-fn column_widths(table: &Table) -> Vec<f32> {
+fn column_widths(table: &Table) -> (Vec<f32>, usize) {
+    let sampled_rows = table.row_count().min(WIDTH_SAMPLE_ROWS);
     let mut widths = vec![0usize; table.column_count()];
     for (col, w) in widths.iter_mut().enumerate() {
-        let sampled = (0..table.row_count().min(WIDTH_SAMPLE_ROWS)).map(|row| table.cell(row, col));
+        let sampled = (0..sampled_rows).map(|row| table.cell(row, col));
         *w = std::iter::once(table.header(col))
             .chain(sampled)
             .map(|text| display_width(&text))
             .max()
             .unwrap_or(0);
     }
-    widths
+    let widths = widths
         .into_iter()
         .map(|w| (w as f32 * CHAR_WIDTH + CELL_PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH))
-        .collect()
+        .collect();
+    (widths, sampled_rows)
 }
 
 fn display_width(s: &str) -> usize {
