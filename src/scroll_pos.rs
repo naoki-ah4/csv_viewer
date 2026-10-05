@@ -10,6 +10,13 @@
 
 use crate::ROW_HEIGHT;
 
+/// ページ送りで動かす行数。領域に収まる行数から1行引く（前後のつながりが分かるように）。
+/// 領域が小さくても、1行は動く。
+pub fn page_rows(viewport_height: f32) -> usize {
+    let visible_rows = (viewport_height.max(0.0) / ROW_HEIGHT).floor() as usize;
+    visible_rows.saturating_sub(1).max(1)
+}
+
 /// キーボードによる縦の移動。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nav {
@@ -81,8 +88,7 @@ impl ScrollPos {
     /// ページ送りは、領域に収まる行数から1行引いた行数ぶん動かす（前後のつながりが分かるよう、
     /// 1行ぶん重ねる）。ただし末尾では、最後の行が領域の下端に揃う位置（`max`）で止まる。
     pub fn navigated(self, nav: Nav, max: Self, viewport_height: f32) -> Self {
-        let visible_rows = (viewport_height.max(0.0) / ROW_HEIGHT).floor() as usize;
-        let page_rows = visible_rows.saturating_sub(1).max(1);
+        let page_rows = page_rows(viewport_height);
         let at_row = |row: usize| Self { row, offset: 0.0 };
         match nav {
             // 行の途中にいるときの `↑` は、その行の先頭へ戻る。
@@ -325,6 +331,16 @@ mod tests {
         let max = ScrollPos::max(100, 10.0);
         let moved = ScrollPos::TOP.navigated(Nav::PageDown, max, 10.0);
         assert_eq!(moved, ScrollPos { row: 1, offset: 0.0 });
+    }
+
+    #[test]
+    fn the_page_size_is_one_row_less_than_what_fits() {
+        assert_eq!(page_rows(700.0), 28, "29 rows fit");
+        assert_eq!(page_rows(24.0 * 10.0), 9);
+        assert_eq!(page_rows(48.0), 1);
+        assert_eq!(page_rows(10.0), 1, "a tiny area still moves one row");
+        assert_eq!(page_rows(0.0), 1);
+        assert_eq!(page_rows(-5.0), 1);
     }
 }
 

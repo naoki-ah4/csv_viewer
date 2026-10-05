@@ -1,5 +1,6 @@
 mod cell_popup;
 mod csv_data;
+mod drag_scroll;
 mod encodings;
 mod goto;
 mod lazy_table;
@@ -13,8 +14,9 @@ mod search;
 mod selection;
 mod table;
 mod text_input;
+mod text_select;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Application, Bounds, ClipboardItem, Context, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
+    App, Application, Bounds, ClipboardItem, Context, CursorStyle, HighlightStyle, Hsla, StyledText, TextLayout, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
     Entity, Rgba, ScrollWheelEvent, Subscription, Task, Window, WindowBounds, WindowOptions, actions, canvas, div, point,
     prelude::*, px, rgb, rgba, size,
@@ -33,7 +35,8 @@ use goto::{GotoInput, GotoKey};
 use matcher::{Direction, Matcher, Outcome};
 use scroll_pos::{Nav, ScrollPos};
 use search::Match;
-use selection::{CellPos, Selection};
+use selection::{CellPos, Selection, Step};
+use text_select::TextSelection;
 use scrollbar::{Axis, AxisState};
 use table::Table;
 use text_input::{TextInput, TextInputEvent};
@@ -50,6 +53,24 @@ actions!(
         FindPrevious,
         CopySelection,
         SelectAllCells,
+        ExtendUp,
+        ExtendDown,
+        ExtendLeft,
+        ExtendRight,
+        ExtendPageUp,
+        ExtendPageDown,
+        ExtendToTop,
+        ExtendToBottom,
+        ExtendToLineStart,
+        ExtendToLineEnd,
+        ExtendToFirst,
+        ExtendToLast,
+        MoveLeft,
+        MoveRight,
+        GoHome,
+        GoEnd,
+        GoFirst,
+        GoLast,
         ScrollLineUp,
         ScrollLineDown,
         ScrollPageUp,
@@ -61,6 +82,15 @@ actions!(
 
 const ROW_HEIGHT: f32 = 24.0;
 const MENU_WIDTH: f32 = 200.0;
+/// ドラッグ中に、表の端の外へ出たとき、スクロールを続ける間隔。
+const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(16);
+/// ポップアップの文章で、選んだ範囲の背景色。
+const TEXT_SELECTION_BG: Rgba = Rgba {
+    r: 0.23,
+    g: 0.51,
+    b: 0.96,
+    a: 0.30,
+};
 /// 検索で一致したセル。画面に見えているものだけを、薄い黄色にする。
 const SEARCH_HIT_BG: Rgba = Rgba {
     r: 1.0,
@@ -116,6 +146,12 @@ struct CellPopup {
     text: String,
     /// 切り詰める前の文字数。
     total_chars: usize,
+    /// 文章の中で選んだ範囲。
+    selection: Option<TextSelection>,
+    /// 文章を組んだ結果。マウスの位置を、文字の位置に直すのに使う。描画のたびに、差し替わる。
+    layout: Rc<RefCell<Option<TextLayout>>>,
+    /// 文章の上で、ボタンを押して、範囲を広げているところ。
+    selecting: bool,
 }
 
 /// 検索の状態。検索語が入力されているあいだ、持つ。
@@ -188,6 +224,10 @@ struct Viewer {
     selection: Option<Selection>,
     /// マウスのボタンを押して、選択範囲を広げているところ。
     selecting: bool,
+    /// 範囲を広げているときの、ポインタの位置。端の外へ出たとき、スクロールを続けるのに使う。
+    last_pointer: Option<Point<Pixels>>,
+    /// ドラッグ中に、表の端の外へ出たとき、スクロールし続けるタスク。ボタンを離すと止まる。
+    autoscroll_task: Option<Task<()>>,
     /// 検索バーの入力欄。最初に開いたときに作る。
     search_input: Option<Entity<TextInput>>,
     search_subscription: Option<Subscription>,
@@ -234,6 +274,8 @@ impl Viewer {
             popup: None,
             selection: None,
             selecting: false,
+            last_pointer: None,
+            autoscroll_task: None,
             search_input: None,
             search_subscription: None,
             search_open: false,
@@ -320,7 +362,7 @@ impl Viewer {
                 self.clear_search();
                 self.search_open = false;
                 self.selection = None;
-                self.selecting = false;
+                self.stop_selecting();
                 self.notice = None;
                 self.path = Some(path.to_path_buf());
                 self.forced_encoding = forced;
@@ -515,8 +557,29 @@ impl Viewer {
             anchor,
             text,
             total_chars,
+            selection: None,
+            layout: Rc::new(RefCell::new(None)),
+            selecting: false,
         });
         cx.notify();
+    }
+
+    /// 範囲を広げる操作の、共通の準備。開いているものを閉じて、ドラッグ中の自動スクロールを始める。
+    fn begin_selecting(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // 全体のクリックで閉じる処理（ルート要素）には、渡さない。
+        cx.stop_propagation();
+        self.popup = None;
+        self.encoding_menu = None;
+        self.notice = None;
+        self.selecting = true;
+        self.last_pointer = Some(position);
+        self.start_autoscroll(window, cx);
+    }
+
+    /// 範囲を広げる操作を終える。自動スクロールも止める。
+    fn stop_selecting(&mut self) {
+        self.selecting = false;
+        self.autoscroll_task = None;
     }
 
     /// 本体のセルを押した。クリックで選択、`Shift+クリック`で範囲を広げる、ダブルクリックで全文を出す。
@@ -525,20 +588,20 @@ impl Viewer {
         row: usize,
         col: usize,
         event: &MouseDownEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 全体のクリックで閉じる処理（ルート要素）には、渡さない。
-        cx.stop_propagation();
-        self.popup = None;
-        self.encoding_menu = None;
-        self.notice = None;
         let pos = CellPos { row, col };
         if event.click_count >= 2 {
+            cx.stop_propagation();
+            self.popup = None;
+            self.encoding_menu = None;
+            self.notice = None;
             self.selection = Some(Selection::cell(pos));
             self.open_cell_popup(Some(row), col, event.position, cx);
             return;
         }
-        self.selecting = true;
+        self.begin_selecting(event.position, window, cx);
         self.selection = Some(match (event.modifiers.shift, self.selection) {
             (true, Some(current)) => current.extended_to(pos),
             _ => Selection::cell(pos),
@@ -562,12 +625,14 @@ impl Viewer {
     }
 
     /// 行番号を押した。その行全体を選ぶ。`Shift+クリック`で、行の範囲を広げる。
-    fn press_row_number(&mut self, row: usize, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        cx.stop_propagation();
-        self.popup = None;
-        self.encoding_menu = None;
-        self.notice = None;
-        self.selecting = true;
+    fn press_row_number(
+        &mut self,
+        row: usize,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_selecting(event.position, window, cx);
         self.selection = Some(match (event.modifiers.shift, self.selection) {
             (true, Some(current)) => current.extended_to(CellPos { row, col: 0 }),
             _ => Selection::whole_row(row),
@@ -575,36 +640,242 @@ impl Viewer {
         cx.notify();
     }
 
+    /// 列番号を押した。その列全体を選ぶ。`Shift+クリック`で、列の範囲を広げる。
+    fn press_col_number(
+        &mut self,
+        col: usize,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_selecting(event.position, window, cx);
+        self.selection = Some(match (event.modifiers.shift, self.selection) {
+            (true, Some(current)) => current.extended_to(CellPos { row: 0, col }),
+            _ => Selection::whole_column(col),
+        });
+        cx.notify();
+    }
+
+    /// `Shift+矢印` など：現在位置を動かして、選択範囲を広げる。
+    fn extend_selection(&mut self, step: Step, cx: &mut Context<Self>) {
+        self.change_selection(step, false, cx);
+    }
+
+    /// 矢印キーなど。選択があれば、スプレッドシートと同じく、選択を動かす（1つのセルになる）。
+    /// 選択がなければ、これまでどおり、表をスクロールする。
+    fn move_or_scroll(&mut self, step: Step, nav: Nav, cx: &mut Context<Self>) {
+        if self.selection.is_some() {
+            self.change_selection(step, true, cx);
+        } else {
+            self.navigate(nav, cx);
+        }
+    }
+
+    /// 現在位置を `step` だけ動かす。`collapse` なら、選択を、動かした先の1つのセルにする。
+    /// そうでなければ、アンカーはそのままに、範囲を広げる。選択がなければ、画面の先頭の行から始める。
+    fn change_selection(&mut self, step: Step, collapse: bool, cx: &mut Context<Self>) {
+        let Some(loaded) = self.loaded.as_ref() else {
+            return;
+        };
+        let rows = loaded.table.row_count();
+        let columns = loaded.table.column_count();
+        if rows == 0 || columns == 0 {
+            return;
+        }
+        let base = self.selection.unwrap_or_else(|| {
+            Selection::cell(CellPos {
+                row: self.scroll.row.min(rows - 1),
+                col: 0,
+            })
+        });
+        let extended = if collapse {
+            base.moved_by(step, rows, columns)
+        } else {
+            base.extended_by(step, rows, columns)
+        };
+        self.selection = Some(extended);
+        self.popup = None;
+        self.notice = None;
+        let head = extended.head();
+        self.reveal(Match {
+            row: head.row,
+            col: head.col,
+        });
+        cx.notify();
+    }
+
+    /// ページ送りで広げる行数。
+    fn page_step_rows(&self) -> usize {
+        scroll_pos::page_rows(f32::from(self.viewport.get().size.height))
+    }
+
+    /// ドラッグ中に、ポインタが表の端の外へ出たら、スクロールし続ける。ボタンを離すまで動く。
+    fn start_autoscroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let timer = cx.background_executor().clone();
+        self.autoscroll_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                timer.timer(AUTOSCROLL_INTERVAL).await;
+                let keep_going = this
+                    .update_in(cx, |this, _, cx| this.autoscroll_tick(cx))
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// 自動スクロールの1回ぶん。続けて呼ぶ必要があれば `true`。
+    fn autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.selecting {
+            return false;
+        }
+        let (Some(pointer), Some(loaded)) = (self.last_pointer, self.loaded.as_ref()) else {
+            return self.selecting;
+        };
+        let rows_area = self.viewport.get();
+        let x_area = self.h_scroll.bounds();
+        if rows_area.size.height <= px(0.) || x_area.size.width <= px(0.) {
+            return true;
+        }
+        let top = f32::from(rows_area.origin.y);
+        let bottom = f32::from(rows_area.origin.y + rows_area.size.height);
+        let left = f32::from(x_area.origin.x);
+        let right = f32::from(x_area.origin.x + x_area.size.width);
+        let (pointer_x, pointer_y) = (f32::from(pointer.x), f32::from(pointer.y));
+        let dy = drag_scroll::edge_scroll(pointer_y, top, bottom);
+        let dx = drag_scroll::edge_scroll(pointer_x, left, right);
+        if dy == 0.0 && dx == 0.0 {
+            return true;
+        }
+        if dy != 0.0 {
+            self.scroll = self
+                .scroll
+                .scrolled_by(f64::from(dy))
+                .clamped(self.max_scroll());
+        }
+        if dx != 0.0 {
+            let max = f32::from(self.h_scroll.max_offset().width).max(0.0);
+            let next = (-f32::from(self.h_scroll.offset().x) + dx).clamp(0.0, max);
+            self.h_scroll
+                .set_offset(point(px(-next), self.h_scroll.offset().y));
+        }
+        // 範囲を、ポインタがある側の端のセルまで広げる。
+        let rows = loaded.table.row_count();
+        let visible = visible_rows(self.scroll, f32::from(rows_area.size.height), rows);
+        let content_left = left + f32::from(self.h_scroll.offset().x);
+        let row = drag_scroll::row_at(
+            drag_scroll::clamp_into(pointer_y, top, bottom),
+            top,
+            visible.first,
+            visible.offset,
+            ROW_HEIGHT,
+            rows,
+        );
+        let col = drag_scroll::col_at(
+            drag_scroll::clamp_into(pointer_x, left, right),
+            content_left,
+            &loaded.col_widths,
+        );
+        if let (Some(row), Some(col), Some(current)) = (row, col, self.selection) {
+            self.selection = Some(current.extended_to(CellPos { row, col }));
+        }
+        cx.notify();
+        true
+    }
+
+    /// ポップアップの文章の中で、マウスの位置にある文字の位置。
+    fn popup_text_index(&self, position: Point<Pixels>) -> Option<usize> {
+        let layout = self.popup.as_ref()?.layout.borrow().clone()?;
+        Some(match layout.index_for_position(position) {
+            Ok(index) | Err(index) => index,
+        })
+    }
+
+    /// ポップアップの文章を押した。そこから、範囲を広げられるようにする。
+    fn press_popup_text(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(index) = self.popup_text_index(position) else {
+            return;
+        };
+        if let Some(popup) = self.popup.as_mut() {
+            popup.selection = Some(TextSelection::at(index));
+            popup.selecting = true;
+        }
+        cx.notify();
+    }
+
+    fn drag_popup_text(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(index) = self.popup_text_index(position) else {
+            return;
+        };
+        if let Some(popup) = self.popup.as_mut() {
+            if let (true, Some(current)) = (popup.selecting, popup.selection) {
+                let extended = current.extended_to(index);
+                if extended != current {
+                    popup.selection = Some(extended);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn release_popup_text(&mut self) {
+        if let Some(popup) = self.popup.as_mut() {
+            popup.selecting = false;
+        }
+    }
+
+    /// `Cmd+A`：ポップアップが開いていれば、その文章を全部選ぶ。開いていなければ、表の全行を選ぶ。
     fn select_all_cells(&mut self, cx: &mut Context<Self>) {
+        if let Some(popup) = self.popup.as_mut() {
+            popup.selection = Some(TextSelection::all(popup.text.len()));
+            cx.notify();
+            return;
+        }
         let rows = self.row_count();
         self.selection = Selection::all_rows(rows);
         self.notice = None;
         cx.notify();
     }
 
-    /// 選択範囲を、タブ区切りでコピーする。ポップアップが開いているときは、そのセルの全文を
-    /// コピーする（ポップアップに出ている、切り詰めた文字列ではなく）。
+    /// `Cmd+C`。ポップアップが開いていて、文章を選んでいれば、その部分を。選んでいなければ、そのセルの
+    /// 全文を（ポップアップに出ている、切り詰めた文字列ではなく）。ポップアップがなければ、選択範囲を、
+    /// タブ区切りで。
     fn copy_selection(&mut self, cx: &mut Context<Self>) {
         let Some(loaded) = self.loaded.as_ref() else {
             return;
         };
         if let Some(popup) = self.popup.as_ref() {
-            let text = match popup.row {
-                Some(row) => loaded.table.cell(row, popup.col),
-                None => loaded.table.header(popup.col),
-            }
-            .into_owned();
-            let chars = text.chars().count();
+            let selected = popup
+                .selection
+                .filter(|s| !s.is_empty())
+                .map(|s| text_select::slice(&popup.text, &s.range()).to_string());
+            let (text, message) = match selected {
+                Some(text) => {
+                    let chars = text.chars().count();
+                    (text, format!("選んだ文字をコピーしました（{chars} 文字）"))
+                }
+                None => {
+                    let text = match popup.row {
+                        Some(row) => loaded.table.cell(row, popup.col),
+                        None => loaded.table.header(popup.col),
+                    }
+                    .into_owned();
+                    let chars = text.chars().count();
+                    (text, format!("セルの全文をコピーしました（{chars} 文字）"))
+                }
+            };
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.notice = Some(format!("セルの全文をコピーしました（{chars} 文字）"));
+            self.notice = Some(message);
             cx.notify();
             return;
         }
         let Some(selection) = self.selection else {
             return;
         };
+        let rows_total = loaded.table.row_count();
         let columns = loaded.table.column_count();
-        let cells = selection.cell_count(columns);
+        let cells = selection.cell_count(rows_total, columns);
         if cells > selection::COPY_CAP_CELLS {
             self.notice = Some(format!(
                 "選択が大きすぎて、コピーできません（{cells} セル。上限は {} セル）",
@@ -613,10 +884,12 @@ impl Viewer {
             cx.notify();
             return;
         }
-        let text = selection::to_tsv(selection.rows(), selection.cols(columns), |row, col| {
-            loaded.table.cell(row, col)
-        });
-        let (rows, cols) = selection.dimensions(columns);
+        let text = selection::to_tsv(
+            selection.rows(rows_total),
+            selection.cols(columns),
+            |row, col| loaded.table.cell(row, col),
+        );
+        let (rows, cols) = selection.dimensions(rows_total, columns);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.notice = Some(format!("{rows} 行 × {cols} 列をコピーしました"));
         cx.notify();
@@ -667,8 +940,8 @@ impl Viewer {
         row: usize,
         col: usize,
     ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
-        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            this.press_cell(row, col, event, cx)
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            this.press_cell(row, col, event, window, cx)
         })
     }
 
@@ -688,8 +961,8 @@ impl Viewer {
         cx: &Context<Self>,
         row: usize,
     ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
-        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            this.press_row_number(row, event, cx)
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            this.press_row_number(row, event, window, cx)
         })
     }
 
@@ -700,6 +973,26 @@ impl Viewer {
         cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
             if event.dragging() {
                 this.drag_cell(row, 0, cx);
+            }
+        })
+    }
+
+    fn col_number_press(
+        cx: &Context<Self>,
+        col: usize,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            this.press_col_number(col, event, window, cx)
+        })
+    }
+
+    fn col_number_drag(
+        cx: &Context<Self>,
+        col: usize,
+    ) -> impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            if event.dragging() {
+                this.drag_cell(0, col, cx);
             }
         })
     }
@@ -1239,6 +1532,7 @@ impl Viewer {
         let search_current = self.search_state.as_ref().and_then(|s| s.current);
         let selection = self.selection;
         let column_count = loaded.table.column_count();
+        let row_total = loaded.table.row_count();
         let header = div()
             .flex()
             .flex_row()
@@ -1264,7 +1558,15 @@ impl Viewer {
                     .col_widths
                     .iter()
                     .enumerate()
-                    .map(|(i, w)| cell((i + 1).to_string(), *w)),
+                    .map(|(i, w)| {
+                        cell((i + 1).to_string(), *w)
+                            .when(
+                                selection.is_some_and(|s| s.cols(column_count).contains(&i)),
+                                |d| d.bg(SELECTED_CELL_BG),
+                            )
+                            .on_mouse_down(MouseButton::Left, Self::col_number_press(cx, i))
+                            .on_mouse_move(Self::col_number_drag(cx, i))
+                    }),
             );
         let total_width: f32 = loaded.col_widths.iter().sum();
         let row_count = loaded.table.row_count();
@@ -1289,7 +1591,7 @@ impl Viewer {
                 .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
                     let text = loaded.table.cell(ix, i).to_string();
                     // 強調の優先順位：選択範囲、検索の現在の一致、検索の一致。
-                    let background = if selection.is_some_and(|s| s.contains(ix, i, column_count)) {
+                    let background = if selection.is_some_and(|s| s.contains(ix, i, row_total, column_count)) {
                         Some(SELECTED_CELL_BG)
                     } else if search_current == Some(Match { row: ix, col: i }) {
                         Some(SEARCH_CURRENT_BG)
@@ -1315,7 +1617,7 @@ impl Viewer {
                 .h(px(ROW_HEIGHT))
                 .px_2()
                 .text_color(rgb(0x888888))
-                .bg(if selection.is_some_and(|s| s.rows().contains(&ix)) {
+                .bg(if selection.is_some_and(|s| s.rows(row_total).contains(&ix)) {
                     rgb(0xd6e6fb)
                 } else {
                     rgb(if ix % 2 == 1 { 0xf0f0f0 } else { 0xf6f6f6 })
@@ -1483,7 +1785,7 @@ impl Viewer {
     }
 
     /// クリックしたセルの全文。表の上に重ねて出す。
-    fn render_popup(&self, window: &Window) -> Option<impl IntoElement> {
+    fn render_popup(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let popup = self.popup.as_ref()?;
         let window_size = window.viewport_size();
         let (x, y) = cell_popup::place(
@@ -1502,6 +1804,18 @@ impl Viewer {
                 popup.total_chars
             )
         });
+        // 選んだ範囲の背景を塗る。文章を組んだ結果は、マウスの位置を文字の位置に直すために、取っておく。
+        let mut text = StyledText::new(popup.text.clone());
+        if let Some(range) = popup.selection.map(|s| s.range()).filter(|r| !r.is_empty()) {
+            text = text.with_highlights([(
+                range,
+                HighlightStyle {
+                    background_color: Some(Hsla::from(TEXT_SELECTION_BG)),
+                    ..Default::default()
+                },
+            )]);
+        }
+        *popup.layout.borrow_mut() = Some(text.layout().clone());
         Some(
             div()
                 .id("cell-popup")
@@ -1533,7 +1847,27 @@ impl Viewer {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .child(popup.text.clone()),
+                        .cursor(CursorStyle::IBeam)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                this.press_popup_text(event.position, cx)
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                            if event.dragging() {
+                                this.drag_popup_text(event.position, cx);
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, _| this.release_popup_text()),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, _| this.release_popup_text()),
+                        )
+                        .child(text),
                 )
                 .children(truncated.map(|note| {
                     div().text_xs().text_color(rgb(0xb06000)).child(note)
@@ -1677,11 +2011,12 @@ impl Viewer {
                     l.table.column_count(),
                 );
                 let label = encodings::status_label(l.table.encoding(), self.forced_encoding);
+                let (rows_total, cols_total) = (l.table.row_count(), l.table.column_count());
                 let selected = self
                     .selection
-                    .filter(|s| !s.is_single_cell(l.table.column_count()))
+                    .filter(|s| !s.is_single_cell(rows_total, cols_total))
                     .map(|s| {
-                        let (rows, cols) = s.dimensions(l.table.column_count());
+                        let (rows, cols) = s.dimensions(rows_total, cols_total);
                         format!(" / 選択 {rows} 行 × {cols} 列")
                     });
                 bar.child(head)
@@ -1848,6 +2183,20 @@ impl Render for Viewer {
             .on_action(cx.listener(|this, _: &FindInTable, window, cx| this.open_search(window, cx)))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy_selection(cx)))
             .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all_cells(cx)))
+            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend_selection(Step::Up, cx)))
+            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend_selection(Step::Down, cx)))
+            .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| this.extend_selection(Step::Left, cx)))
+            .on_action(cx.listener(|this, _: &ExtendRight, _, cx| this.extend_selection(Step::Right, cx)))
+            .on_action(cx.listener(|this, _: &ExtendPageUp, _, cx| {
+                let rows = this.page_step_rows();
+                this.extend_selection(Step::PageUp(rows), cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExtendPageDown, _, cx| {
+                let rows = this.page_step_rows();
+                this.extend_selection(Step::PageDown(rows), cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExtendToTop, _, cx| this.extend_selection(Step::Top, cx)))
+            .on_action(cx.listener(|this, _: &ExtendToBottom, _, cx| this.extend_selection(Step::Bottom, cx)))
             .on_action(cx.listener(|this, _: &FindNext, window, cx| {
                 if this.search_state.is_some() {
                     this.search_step(Direction::Forward, window, cx);
@@ -1875,12 +2224,62 @@ impl Render for Viewer {
             )
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
-            .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| this.navigate(Nav::LineUp, cx)))
-            .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| this.navigate(Nav::LineDown, cx)))
-            .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| this.navigate(Nav::PageUp, cx)))
-            .on_action(cx.listener(|this, _: &ScrollPageDown, _, cx| this.navigate(Nav::PageDown, cx)))
-            .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| this.navigate(Nav::Top, cx)))
-            .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| this.navigate(Nav::Bottom, cx)))
+            .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| {
+                this.move_or_scroll(Step::Up, Nav::LineUp, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| {
+                this.move_or_scroll(Step::Down, Nav::LineDown, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| {
+                let rows = this.page_step_rows();
+                this.move_or_scroll(Step::PageUp(rows), Nav::PageUp, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ScrollPageDown, _, cx| {
+                let rows = this.page_step_rows();
+                this.move_or_scroll(Step::PageDown(rows), Nav::PageDown, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| {
+                this.move_or_scroll(Step::Top, Nav::Top, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| {
+                this.move_or_scroll(Step::Bottom, Nav::Bottom, cx)
+            }))
+            // 左右は、選択を動かすだけ（選択がなければ、何もしない）。
+            .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
+                if this.selection.is_some() {
+                    this.change_selection(Step::Left, true, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
+                if this.selection.is_some() {
+                    this.change_selection(Step::Right, true, cx);
+                }
+            }))
+            // `Home` `End`：選択があれば、その行の先頭/末尾の列へ。なければ、表の先頭/末尾へ。
+            .on_action(cx.listener(|this, _: &GoHome, _, cx| {
+                this.move_or_scroll(Step::LineStart, Nav::Top, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoEnd, _, cx| {
+                this.move_or_scroll(Step::LineEnd, Nav::Bottom, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoFirst, _, cx| {
+                this.move_or_scroll(Step::First, Nav::Top, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoLast, _, cx| {
+                this.move_or_scroll(Step::Last, Nav::Bottom, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExtendToLineStart, _, cx| {
+                this.extend_selection(Step::LineStart, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExtendToLineEnd, _, cx| {
+                this.extend_selection(Step::LineEnd, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExtendToFirst, _, cx| {
+                this.extend_selection(Step::First, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExtendToLast, _, cx| {
+                this.extend_selection(Step::Last, cx)
+            }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.paths().first() {
                     this.open_path(path.clone(), window, cx);
@@ -1888,6 +2287,9 @@ impl Render for Viewer {
             }))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xe8f0fe)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.selecting {
+                    this.last_pointer = Some(ev.position);
+                }
                 if ev.dragging() {
                     this.drag_to(ev.position, cx);
                 }
@@ -1896,7 +2298,7 @@ impl Render for Viewer {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.drag = None;
-                    this.selecting = false;
+                    this.stop_selecting();
                     cx.notify();
                 }),
             )
@@ -1904,7 +2306,7 @@ impl Render for Viewer {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.drag = None;
-                    this.selecting = false;
+                    this.stop_selecting();
                     cx.notify();
                 }),
             )
@@ -1912,7 +2314,7 @@ impl Render for Viewer {
             .child(self.render_status(cx))
             .children(self.render_goto())
             .children(self.render_search())
-            .children(self.render_popup(window))
+            .children(self.render_popup(window, cx))
             .children(self.render_encoding_menu(window, cx))
     }
 }
@@ -1999,10 +2401,27 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", ScrollLineDown, table),
         KeyBinding::new("pageup", ScrollPageUp, table),
         KeyBinding::new("pagedown", ScrollPageDown, table),
-        KeyBinding::new("home", ScrollToTop, table),
-        KeyBinding::new("end", ScrollToBottom, table),
+        KeyBinding::new("left", MoveLeft, table),
+        KeyBinding::new("right", MoveRight, table),
+        KeyBinding::new("home", GoHome, table),
+        KeyBinding::new("end", GoEnd, table),
+        KeyBinding::new("cmd-home", GoFirst, table),
+        KeyBinding::new("cmd-end", GoLast, table),
         KeyBinding::new("cmd-up", ScrollToTop, table),
         KeyBinding::new("cmd-down", ScrollToBottom, table),
+        // 選択範囲を、キーボードで広げる。
+        KeyBinding::new("shift-up", ExtendUp, table),
+        KeyBinding::new("shift-down", ExtendDown, table),
+        KeyBinding::new("shift-left", ExtendLeft, table),
+        KeyBinding::new("shift-right", ExtendRight, table),
+        KeyBinding::new("shift-pageup", ExtendPageUp, table),
+        KeyBinding::new("shift-pagedown", ExtendPageDown, table),
+        KeyBinding::new("shift-home", ExtendToLineStart, table),
+        KeyBinding::new("shift-end", ExtendToLineEnd, table),
+        KeyBinding::new("cmd-shift-home", ExtendToFirst, table),
+        KeyBinding::new("cmd-shift-end", ExtendToLast, table),
+        KeyBinding::new("cmd-shift-up", ExtendToTop, table),
+        KeyBinding::new("cmd-shift-down", ExtendToBottom, table),
     ]
 }
 
@@ -2272,10 +2691,18 @@ mod tests {
             for (keystroke, expected) in [
                 ("cmd-c", "csv_viewer::CopySelection"),
                 ("cmd-a", "csv_viewer::SelectAllCells"),
-                ("home", "csv_viewer::ScrollToTop"),
-                ("end", "csv_viewer::ScrollToBottom"),
+                ("home", "csv_viewer::GoHome"),
+                ("end", "csv_viewer::GoEnd"),
+                ("left", "csv_viewer::MoveLeft"),
+                ("cmd-home", "csv_viewer::GoFirst"),
+                ("cmd-up", "csv_viewer::ScrollToTop"),
+                ("shift-home", "csv_viewer::ExtendToLineStart"),
                 ("up", "csv_viewer::ScrollLineUp"),
                 ("pagedown", "csv_viewer::ScrollPageDown"),
+                ("shift-down", "csv_viewer::ExtendDown"),
+                ("shift-left", "csv_viewer::ExtendLeft"),
+                ("shift-pagedown", "csv_viewer::ExtendPageDown"),
+                ("cmd-shift-up", "csv_viewer::ExtendToTop"),
             ] {
                 assert_eq!(
                     top_action(&keymap, &key(keystroke), &[TABLE_CONTEXT]).as_deref(),
