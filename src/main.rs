@@ -4,13 +4,15 @@ mod scrollbar;
 use std::path::PathBuf;
 
 use gpui::{
-    App, Application, Bounds, Context, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
-    ScrollHandle, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, point,
-    prelude::*, px, rgb, rgba, size, uniform_list,
+    App, Application, Bounds, Context, FocusHandle, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, actions, div, point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 
 use csv_data::CsvTable;
 use scrollbar::{AxisState, Axis};
+
+actions!(csv_viewer, [Quit, CloseWindow]);
 
 const ROW_HEIGHT: f32 = 24.0;
 const MIN_COL_WIDTH: f32 = 60.0;
@@ -32,10 +34,11 @@ struct Viewer {
     list_scroll: UniformListScrollHandle,
     h_scroll: ScrollHandle,
     drag: Option<Drag>,
+    focus_handle: FocusHandle,
 }
 
 impl Viewer {
-    fn new(table: CsvTable) -> Self {
+    fn new(table: CsvTable, cx: &mut Context<Self>) -> Self {
         let col_widths = column_widths(&table);
         Self {
             table,
@@ -43,6 +46,7 @@ impl Viewer {
             list_scroll: UniformListScrollHandle::new(),
             h_scroll: ScrollHandle::new(),
             drag: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -249,6 +253,8 @@ impl Render for Viewer {
             .bg(rgb(0xffffff))
             .text_color(rgb(0x222222))
             .text_sm()
+            .track_focus(&self.focus_handle)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if ev.dragging() {
                     this.drag_to(ev.position, cx);
@@ -296,16 +302,51 @@ fn main() -> anyhow::Result<()> {
     let table = CsvTable::load(&path)?;
 
     Application::new().run(move |cx: &mut App| {
+        setup_app(cx);
+
         let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| Viewer::new(table)),
+            |window, cx| {
+                cx.new(|cx| {
+                    let viewer = Viewer::new(table, cx);
+                    viewer.focus_handle.focus(window);
+                    viewer
+                })
+            },
         )
         .unwrap();
         cx.activate(true);
     });
     Ok(())
+}
+
+/// 終了まわりの設定。GPUIは最後のウィンドウが閉じてもアプリを終了しないため、自前で扱う。
+fn setup_app(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    // CloseWindow はウィンドウ側（Viewer のルート要素）で受ける。
+    // アクション処理中は当該ウィンドウが取り出されており、ここから window.update() はできない。
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
+    ]);
+    cx.set_menus(vec![
+        Menu {
+            name: "csv_viewer".into(),
+            items: vec![MenuItem::action("Quit", Quit)],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![MenuItem::action("Close Window", CloseWindow)],
+        },
+    ]);
+    cx.on_window_closed(|cx| {
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
 }
