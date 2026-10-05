@@ -113,28 +113,115 @@ pub fn find_match(
     }
 }
 
-/// 一致する行の数。`cap` に達したら、そこで止める（巨大なファイルで、数を数えきるのに、
-/// 時間がかかりすぎないように）。戻り値は（数、`cap` で打ち切ったか）。
-pub fn count_rows(
-    table: &Table,
-    matcher: &Matcher,
+/// 現在の一致が、一致した行の、何番目か（1始まり）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rank {
+    /// まだ分かっていない（数えている途中、または数えていない）。
+    Unknown,
+    Known(usize),
+    /// 数える上限を超える位置にある。
+    TooFar,
+}
+
+/// 一致する行を、先頭から順に数える。`find_next(from_row)` は、`from_row` 以降で、最初に一致する行を
+/// 返す関数（全読み込みの表と、背景のスレッドの検索で、同じ数え方を使えるよう、関数で受け取る）。
+///
+/// `through` を指定すると、その行まで（その行を含めて）を数える。`cap` に達したら、そこで止める
+/// （巨大なファイルで、数えきるのに、時間がかかりすぎないように）。戻り値は（数、`cap` で打ち切ったか）。
+pub fn count_matching_rows(
+    mut find_next: impl FnMut(usize) -> Outcome<usize>,
+    through: Option<usize>,
     cap: usize,
-    cancel: &AtomicBool,
 ) -> Outcome<(usize, bool)> {
     let mut count = 0;
     let mut next_row = 0;
     loop {
-        match table.find_row(matcher, next_row, Direction::Forward, cancel) {
-            Outcome::Found(row) => {
+        match find_next(next_row) {
+            Outcome::Found(row) if through.is_none_or(|last| row <= last) => {
                 count += 1;
                 if count >= cap {
                     return Outcome::Found((count, true));
                 }
                 next_row = row + 1;
             }
-            Outcome::NotFound => return Outcome::Found((count, false)),
+            Outcome::Found(_) | Outcome::NotFound => return Outcome::Found((count, false)),
             Outcome::Cancelled => return Outcome::Cancelled,
         }
+    }
+}
+
+/// 一致する行の数。戻り値は（数、`cap` で打ち切ったか）。
+pub fn count_rows(
+    table: &Table,
+    matcher: &Matcher,
+    cap: usize,
+    cancel: &AtomicBool,
+) -> Outcome<(usize, bool)> {
+    count_matching_rows(
+        |from| table.find_row(matcher, from, Direction::Forward, cancel),
+        None,
+        cap,
+    )
+}
+
+/// `count_matching_rows` の結果を、順位にする。`through` の行自身が一致している前提。
+pub fn rank_from_count(counted: (usize, bool)) -> Rank {
+    match counted {
+        (_, true) => Rank::TooFar,
+        (count, false) => Rank::Known(count),
+    }
+}
+
+/// 行 `row`（一致している行）が、一致した行の何番目か。
+pub fn rank_of_row(
+    table: &Table,
+    matcher: &Matcher,
+    row: usize,
+    cap: usize,
+    cancel: &AtomicBool,
+) -> Outcome<Rank> {
+    match count_matching_rows(
+        |from| table.find_row(matcher, from, Direction::Forward, cancel),
+        Some(row),
+        cap,
+    ) {
+        Outcome::Found(counted) => Outcome::Found(rank_from_count(counted)),
+        Outcome::NotFound => Outcome::NotFound,
+        Outcome::Cancelled => Outcome::Cancelled,
+    }
+}
+
+/// 隣の一致へ動いたあとの順位を、数え直さずに、決める。決められなければ `Unknown`
+/// （呼び出し側が、先頭から数える）。
+///
+/// - `previous`: 動く前の（行、順位）
+/// - `wrapped`: 端で折り返したか。前向きの折り返しは、全体の最初の一致に着く。
+///   後ろ向きの折り返しは、最後の一致に着くので、総数が分かっていれば、それが順位。
+/// - `exact_total`: 一致した行の、正確な総数（打ち切りや、索引作成の途中のときは `None`）
+pub fn rank_after_move(
+    previous: Option<(usize, Rank)>,
+    new_row: usize,
+    dir: Direction,
+    wrapped: bool,
+    exact_total: Option<usize>,
+) -> Rank {
+    match (previous, wrapped, dir) {
+        (_, true, Direction::Forward) => Rank::Known(1),
+        (_, true, Direction::Backward) => exact_total.map_or(Rank::Unknown, Rank::Known),
+        // 同じ行の、別のセルへ動いただけなら、順位は変わらない。
+        (Some((row, rank)), false, _) if row == new_row => rank,
+        // 隣の一致の行へ動いたなら、順位は1つ増える（減る）。
+        (Some((row, Rank::Known(rank))), false, Direction::Forward) if new_row > row => {
+            Rank::Known(rank + 1)
+        }
+        (Some((row, Rank::Known(rank))), false, Direction::Backward)
+            if new_row < row && rank > 1 =>
+        {
+            Rank::Known(rank - 1)
+        }
+        // 上限を超えた位置から、さらに先へ進んでも、上限を超えたまま。
+        (Some((row, Rank::TooFar)), false, Direction::Forward) if new_row > row => Rank::TooFar,
+        _ => Rank::Unknown,
     }
 }
 
@@ -297,6 +384,15 @@ mod tests {
                 Outcome::Found(want),
                 "count: {label} {needle:?}"
             );
+
+            // 一致した行の、すべてについて、順位が基準と同じ。
+            for (index, &row) in o.matching_rows.iter().enumerate() {
+                assert_eq!(
+                    rank_of_row(table, &matcher, row, usize::MAX, &NEVER),
+                    Outcome::Found(Rank::Known(index + 1)),
+                    "rank of row {row}: {label} {needle:?}"
+                );
+            }
         }
     }
 
@@ -612,5 +708,139 @@ mod tests {
         assert_eq!(first_row_to_search(m, Direction::Backward, 100), 7);
         assert_eq!(first_row_to_search(None, Direction::Forward, 100), 0);
         assert_eq!(first_row_to_search(None, Direction::Backward, 100), 100);
+    }
+
+    #[test]
+    fn counting_with_a_closure_counts_up_to_a_row_or_a_cap() {
+        // 一致する行：2, 5, 6, 9
+        let hits = [2usize, 5, 6, 9];
+        let find = |from: usize| match hits.iter().find(|&&h| h >= from) {
+            Some(&h) => Outcome::Found(h),
+            None => Outcome::NotFound,
+        };
+        assert_eq!(
+            count_matching_rows(find, None, 100),
+            Outcome::Found((4, false))
+        );
+        assert_eq!(
+            count_matching_rows(find, Some(6), 100),
+            Outcome::Found((3, false))
+        );
+        assert_eq!(
+            count_matching_rows(find, Some(5), 100),
+            Outcome::Found((2, false))
+        );
+        assert_eq!(
+            count_matching_rows(find, Some(1), 100),
+            Outcome::Found((0, false))
+        );
+        // 上限で、打ち切る。
+        assert_eq!(
+            count_matching_rows(find, None, 3),
+            Outcome::Found((3, true))
+        );
+        // 中断は、そのまま伝える。
+        assert_eq!(
+            count_matching_rows(|_| Outcome::Cancelled, None, 100),
+            Outcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn the_rank_of_a_row_is_too_far_when_it_passes_the_cap() {
+        let text: String = (0..30).map(|i| format!("{i},hit\n")).collect();
+        let f = fixture(&encode(encoding_rs::UTF_8, &text), encoding_rs::UTF_8);
+        let matcher = Matcher::new("hit").unwrap();
+        // ヘッダー（0行目の「0,hit」）を除くので、データ行は29行、すべて一致する。
+        for table in [&f.eager, &f.lazy] {
+            assert_eq!(
+                rank_of_row(table, &matcher, 9, 100, &NEVER),
+                Outcome::Found(Rank::Known(10))
+            );
+            assert_eq!(
+                rank_of_row(table, &matcher, 9, 5, &NEVER),
+                Outcome::Found(Rank::TooFar)
+            );
+        }
+    }
+
+    #[test]
+    fn the_rank_follows_a_move_to_the_next_or_previous_match() {
+        use Direction::{Backward, Forward};
+        let at = |row, rank| Some((row, rank));
+        // 隣の一致へ（行は離れていてもよい。間に一致する行はないので）。
+        assert_eq!(
+            rank_after_move(at(10, Rank::Known(3)), 40, Forward, false, None),
+            Rank::Known(4)
+        );
+        assert_eq!(
+            rank_after_move(at(40, Rank::Known(4)), 10, Backward, false, None),
+            Rank::Known(3)
+        );
+        // 同じ行の、別のセル：順位は、そのまま。
+        assert_eq!(
+            rank_after_move(at(10, Rank::Known(3)), 10, Forward, false, None),
+            Rank::Known(3)
+        );
+        assert_eq!(
+            rank_after_move(at(10, Rank::Unknown), 10, Backward, false, None),
+            Rank::Unknown
+        );
+        // 最初の一致から前へは、動けない（折り返しのときだけ）。順位が1以下になる動きは、分からない扱い。
+        assert_eq!(
+            rank_after_move(at(10, Rank::Known(1)), 3, Backward, false, None),
+            Rank::Unknown
+        );
+    }
+
+    #[test]
+    fn the_rank_after_wrapping_is_the_first_or_the_last_match() {
+        use Direction::{Backward, Forward};
+        // 前向きに折り返すと、全体の最初の一致に着く。
+        assert_eq!(
+            rank_after_move(at_any(), 2, Forward, true, None),
+            Rank::Known(1)
+        );
+        // 後ろ向きは、最後の一致。総数が正確に分かっているときだけ、順位が決まる。
+        assert_eq!(
+            rank_after_move(at_any(), 99, Backward, true, Some(12)),
+            Rank::Known(12)
+        );
+        assert_eq!(
+            rank_after_move(at_any(), 99, Backward, true, None),
+            Rank::Unknown
+        );
+    }
+
+    fn at_any() -> Option<(usize, Rank)> {
+        Some((5, Rank::Known(7)))
+    }
+
+    #[test]
+    fn the_rank_is_unknown_when_nothing_is_known_to_start_from() {
+        use Direction::Forward;
+        assert_eq!(
+            rank_after_move(None, 3, Forward, false, Some(5)),
+            Rank::Unknown
+        );
+        assert_eq!(
+            rank_after_move(Some((3, Rank::Unknown)), 8, Forward, false, None),
+            Rank::Unknown
+        );
+    }
+
+    #[test]
+    fn beyond_the_cap_stays_beyond_the_cap_when_moving_forward() {
+        use Direction::{Backward, Forward};
+        let far = Some((500, Rank::TooFar));
+        assert_eq!(
+            rank_after_move(far, 900, Forward, false, None),
+            Rank::TooFar
+        );
+        // 後ろへ戻ると、上限の内側に入るかもしれない。数え直す。
+        assert_eq!(
+            rank_after_move(far, 100, Backward, false, None),
+            Rank::Unknown
+        );
     }
 }

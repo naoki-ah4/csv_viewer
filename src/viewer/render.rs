@@ -341,6 +341,11 @@ impl Render for Viewer {
                 this.extend_selection(Step::Bottom, cx)
             }))
             .on_action(cx.listener(|this, _: &FindNext, window, cx| {
+                // 変換中の `↓` は、変換候補の選択に使われる。日本語入力に渡す。
+                if this.search_input_is_composing(cx) {
+                    cx.propagate();
+                    return;
+                }
                 if this.search_state.is_some() {
                     this.search_step(Direction::Forward, window, cx);
                 } else {
@@ -348,6 +353,10 @@ impl Render for Viewer {
                 }
             }))
             .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
+                if this.search_input_is_composing(cx) {
+                    cx.propagate();
+                    return;
+                }
                 if this.search_state.is_some() {
                     this.search_step(Direction::Backward, window, cx);
                 } else {

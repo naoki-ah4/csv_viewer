@@ -112,7 +112,8 @@ impl TextInput {
         self.focus_handle.focus(window);
     }
 
-    fn is_composing(&self) -> bool {
+    /// 日本語入力などで、変換中（未確定の文字がある）か。
+    pub(crate) fn is_composing(&self) -> bool {
         self.marked_range.is_some()
     }
 

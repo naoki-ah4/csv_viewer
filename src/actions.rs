@@ -76,6 +76,10 @@ pub(crate) fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-end", GoLast, table),
         KeyBinding::new("cmd-up", ScrollToTop, table),
         KeyBinding::new("cmd-down", ScrollToBottom, table),
+        // 検索の入力欄にフォーカスがあるとき：`↓` で次の一致へ、`↑` で前の一致へ（`Enter` と同じ）。
+        // 入力欄が使わないので、割り当てなければ、表の選択やスクロールが動いてしまう。
+        KeyBinding::new("down", FindNext, Some("TextInput")),
+        KeyBinding::new("up", FindPrevious, Some("TextInput")),
         // 選択範囲を、キーボードで広げる。
         KeyBinding::new("shift-up", ExtendUp, table),
         KeyBinding::new("shift-down", ExtendDown, table),
@@ -180,7 +184,7 @@ mod tests {
         let keymap = keymap(true);
         let key = |s: &str| [Keystroke::parse(s).unwrap()];
         let stack = [TABLE_CONTEXT, "TextInput"];
-        // 入力欄が使わない、表のキー（上下、ページ送り）は、入力中でも表に効く。
+        // 入力欄が使わない、表のキー（ページ送り）は、入力中でも表に効く。
         assert_eq!(
             top_action(&keymap, &key("pagedown"), &stack).as_deref(),
             Some("csv_viewer::ScrollPageDown")
@@ -211,5 +215,34 @@ mod tests {
             .as_deref(),
             Some("csv_viewer::CopySelection")
         );
+    }
+
+    #[test]
+    fn up_and_down_in_the_search_box_go_to_the_previous_and_next_match() {
+        for text_first in [true, false] {
+            let keymap = keymap(text_first);
+            let key = |s: &str| [Keystroke::parse(s).unwrap()];
+            let in_search_box = [TABLE_CONTEXT, "TextInput"];
+            // 検索の入力欄にフォーカスがあるとき：`↓` で次の一致、`↑` で前の一致。
+            assert_eq!(
+                top_action(&keymap, &key("down"), &in_search_box).as_deref(),
+                Some("csv_viewer::FindNext"),
+                "text input registered first: {text_first}"
+            );
+            assert_eq!(
+                top_action(&keymap, &key("up"), &in_search_box).as_deref(),
+                Some("csv_viewer::FindPrevious"),
+                "text input registered first: {text_first}"
+            );
+            // 表にフォーカスがあるときは、これまでどおり、選択かスクロール。
+            assert_eq!(
+                top_action(&keymap, &key("down"), &[TABLE_CONTEXT]).as_deref(),
+                Some("csv_viewer::ScrollLineDown")
+            );
+            assert_eq!(
+                top_action(&keymap, &key("up"), &[TABLE_CONTEXT]).as_deref(),
+                Some("csv_viewer::ScrollLineUp")
+            );
+        }
     }
 }

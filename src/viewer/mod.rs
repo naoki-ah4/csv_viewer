@@ -27,7 +27,7 @@ use crate::goto::{GotoInput, GotoKey};
 use crate::matcher::{Direction, Matcher, Outcome};
 use crate::scroll_pos::{Nav, ROW_HEIGHT, ScrollPos};
 use crate::scrollbar::{Axis, AxisState};
-use crate::search::Match;
+use crate::search::{Match, Rank};
 use crate::selection::{CellPos, Selection, Step};
 use crate::table::Table;
 use crate::table::lazy::{IndexJob, IndexStatus};
@@ -123,6 +123,8 @@ struct SearchState {
     count: Option<(usize, bool)>,
     /// 背景の検索の結果を、待っている。
     busy: bool,
+    /// 現在の一致が、一致した行の何番目か。
+    rank: Rank,
 }
 
 #[derive(Clone, Copy)]
@@ -195,6 +197,9 @@ pub(crate) struct Viewer {
     search_cancel: Arc<AtomicBool>,
     search_task: Option<Task<()>>,
     count_cancel: Arc<AtomicBool>,
+    /// 現在の一致の順位を、先頭から数えている処理を、中断するための旗と、そのタスク。
+    rank_cancel: Arc<AtomicBool>,
+    rank_task: Option<Task<()>>,
     count_task: Option<Task<()>>,
     /// 文字コードの切り替えメニュー。開いているあいだ、クリックした位置を持つ。
     encoding_menu: Option<Point<Pixels>>,
@@ -241,6 +246,8 @@ impl Viewer {
             search_cancel: Arc::new(AtomicBool::new(false)),
             search_task: None,
             count_cancel: Arc::new(AtomicBool::new(false)),
+            rank_cancel: Arc::new(AtomicBool::new(false)),
+            rank_task: None,
             count_task: None,
             encoding_menu: None,
             path: None,
