@@ -1,18 +1,19 @@
 mod csv_data;
 mod scrollbar;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Application, Bounds, Context, FocusHandle, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, actions, div, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, Menu, MenuItem,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
+    UniformListScrollHandle, Window, WindowBounds, WindowOptions, actions, div, point,
+    prelude::*, px, rgb, rgba, size, uniform_list,
 };
 
 use csv_data::CsvTable;
-use scrollbar::{AxisState, Axis};
+use scrollbar::{Axis, AxisState};
 
-actions!(csv_viewer, [Quit, CloseWindow]);
+actions!(csv_viewer, [Quit, CloseWindow, OpenFile]);
 
 const ROW_HEIGHT: f32 = 24.0;
 const MIN_COL_WIDTH: f32 = 60.0;
@@ -28,9 +29,15 @@ struct Drag {
     grab: Pixels,
 }
 
-struct Viewer {
+struct Loaded {
     table: CsvTable,
     col_widths: Vec<f32>,
+}
+
+struct Viewer {
+    loaded: Option<Loaded>,
+    /// 直近の読み込み失敗など、ステータスバーに出すメッセージ。
+    error: Option<String>,
     list_scroll: UniformListScrollHandle,
     h_scroll: ScrollHandle,
     drag: Option<Drag>,
@@ -38,16 +45,58 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(table: CsvTable, cx: &mut Context<Self>) -> Self {
-        let col_widths = column_widths(&table);
+    fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            table,
-            col_widths,
+            loaded: None,
+            error: None,
             list_scroll: UniformListScrollHandle::new(),
             h_scroll: ScrollHandle::new(),
             drag: None,
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    /// CSVを読み込んで表示を差し替える。失敗時は直前の表示を残し、メッセージだけ出す。
+    fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        match CsvTable::load(path) {
+            Ok(table) => {
+                let col_widths = column_widths(&table);
+                self.loaded = Some(Loaded { table, col_widths });
+                self.error = None;
+                self.list_scroll
+                    .0
+                    .borrow()
+                    .base_handle
+                    .set_offset(point(px(0.), px(0.)));
+                self.h_scroll.set_offset(point(px(0.), px(0.)));
+                let name = path
+                    .file_name()
+                    .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy());
+                window.set_window_title(&name);
+            }
+            Err(e) => {
+                self.error = Some(format!("開けませんでした: {} ({e})", path.display()));
+            }
+        }
+        cx.notify();
+    }
+
+    fn prompt_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.first() else { return };
+            this.update_in(cx, |this, window, cx| this.open_path(path, window, cx))
+                .ok();
+        })
+        .detach();
     }
 
     fn axis_state(&self, axis: Axis) -> AxisState {
@@ -88,7 +137,11 @@ impl Viewer {
         cx.notify();
     }
 
-    fn thumb_element(&self, axis: Axis, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+    fn thumb_element(
+        &self,
+        axis: Axis,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
         let thumb = self.axis_state(axis).thumb()?;
         let (id, base) = match axis {
             Axis::Vertical => (
@@ -124,6 +177,120 @@ impl Viewer {
                     }),
                 ),
         )
+    }
+
+    fn render_empty(&self) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .justify_center()
+            .items_center()
+            .text_color(rgb(0x888888))
+            .child("CSVファイルをここにドロップ")
+            .child("または Cmd+O で開く")
+    }
+
+    fn render_table(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let loaded = self.loaded.as_ref().expect("render_table requires a loaded CSV");
+        let header = div()
+            .flex()
+            .flex_row()
+            .h(px(ROW_HEIGHT))
+            .bg(rgb(0xf0f0f0))
+            .border_b_1()
+            .border_color(rgb(0xcccccc))
+            .font_weight(gpui::FontWeight::BOLD)
+            .children(
+                loaded.col_widths.iter().enumerate().map(|(i, w)| {
+                    cell(loaded.table.headers.get(i).cloned().unwrap_or_default(), *w)
+                }),
+            );
+        let total_width: f32 = loaded.col_widths.iter().sum();
+        let row_count = loaded.table.rows.len();
+
+        let list = uniform_list(
+            "rows",
+            row_count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+                let Some(loaded) = &this.loaded else {
+                    return Vec::new();
+                };
+                range
+                    .map(|ix| {
+                        let row = &loaded.table.rows[ix];
+                        div()
+                            .flex()
+                            .flex_row()
+                            .h(px(ROW_HEIGHT))
+                            .when(ix % 2 == 1, |d| d.bg(rgb(0xfafafa)))
+                            .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
+                                cell(row.get(i).cloned().unwrap_or_default(), *w)
+                            }))
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(self.list_scroll.clone())
+        .flex_1();
+
+        // ヘッダーと本体を同じ横幅の列にまとめ、外側で横スクロールさせる。
+        let table = div()
+            .flex()
+            .flex_col()
+            .h_full()
+            .min_w(px(total_width))
+            .w_full()
+            .child(header)
+            .child(list);
+
+        // 初回の描画ではスクロール領域の寸法がまだ0なので、確定後にもう一度描画してバーを出す。
+        if self.list_scroll.0.borrow().base_handle.bounds().size.height <= px(0.)
+            || self.h_scroll.bounds().size.width <= px(0.)
+        {
+            window.request_animation_frame();
+        }
+
+        let vbar = self.thumb_element(Axis::Vertical, cx);
+        let hbar = self.thumb_element(Axis::Horizontal, cx);
+
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .id("table-scroll")
+                    .size_full()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.h_scroll)
+                    .child(table),
+            )
+            .children(vbar)
+            .children(hbar)
+    }
+
+    fn render_status(&self) -> impl IntoElement {
+        let text = match (&self.error, &self.loaded) {
+            (Some(error), _) => error.clone(),
+            (None, Some(l)) => format!(
+                "{} 行 / {} 列 / {}",
+                l.table.rows.len(),
+                l.col_widths.len(),
+                l.table.encoding.name()
+            ),
+            (None, None) => String::new(),
+        };
+        div()
+            .h(px(ROW_HEIGHT))
+            .px_2()
+            .bg(rgb(0xf0f0f0))
+            .border_t_1()
+            .border_color(rgb(0xcccccc))
+            .text_sm()
+            .when(self.error.is_some(), |d| d.text_color(rgb(0xb00020)))
+            .child(text)
     }
 }
 
@@ -174,77 +341,11 @@ fn single_line(text: String) -> String {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let widths = self.col_widths.clone();
-        let header = div()
-            .flex()
-            .flex_row()
-            .h(px(ROW_HEIGHT))
-            .bg(rgb(0xf0f0f0))
-            .border_b_1()
-            .border_color(rgb(0xcccccc))
-            .font_weight(gpui::FontWeight::BOLD)
-            .children(
-                widths
-                    .iter()
-                    .enumerate()
-                    .map(|(i, w)| cell(self.table.headers.get(i).cloned().unwrap_or_default(), *w)),
-            );
-
-        let list = uniform_list(
-            "rows",
-            self.table.rows.len(),
-            cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
-                range
-                    .map(|ix| {
-                        let row = &this.table.rows[ix];
-                        div()
-                            .flex()
-                            .flex_row()
-                            .h(px(ROW_HEIGHT))
-                            .when(ix % 2 == 1, |d| d.bg(rgb(0xfafafa)))
-                            .children(this.col_widths.iter().enumerate().map(|(i, w)| {
-                                cell(row.get(i).cloned().unwrap_or_default(), *w)
-                            }))
-                    })
-                    .collect()
-            }),
-        )
-        .track_scroll(self.list_scroll.clone())
-        .flex_1();
-
-        let status = div()
-            .h(px(ROW_HEIGHT))
-            .px_2()
-            .bg(rgb(0xf0f0f0))
-            .border_t_1()
-            .border_color(rgb(0xcccccc))
-            .text_sm()
-            .child(format!(
-                "{} 行 / {} 列 / {}",
-                self.table.rows.len(),
-                self.col_widths.len(),
-                self.table.encoding.name()
-            ));
-
-        // ヘッダーと本体を同じ横幅の列にまとめ、外側で横スクロールさせる。
-        let table = div()
-            .flex()
-            .flex_col()
-            .h_full()
-            .min_w(px(self.col_widths.iter().sum::<f32>()))
-            .w_full()
-            .child(header)
-            .child(list);
-
-        // 初回の描画ではスクロール領域の寸法がまだ0なので、確定後にもう一度描画してバーを出す。
-        if self.list_scroll.0.borrow().base_handle.bounds().size.height <= px(0.)
-            || self.h_scroll.bounds().size.width <= px(0.)
-        {
-            window.request_animation_frame();
-        }
-
-        let vbar = self.thumb_element(Axis::Vertical, cx);
-        let hbar = self.thumb_element(Axis::Horizontal, cx);
+        let body = if self.loaded.is_some() {
+            self.render_table(window, cx).into_any_element()
+        } else {
+            self.render_empty().into_any_element()
+        };
 
         div()
             .size_full()
@@ -255,6 +356,13 @@ impl Render for Viewer {
             .text_sm()
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if let Some(path) = paths.paths().first() {
+                    this.open_path(path, window, cx);
+                }
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xe8f0fe)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if ev.dragging() {
                     this.drag_to(ev.position, cx);
@@ -274,32 +382,13 @@ impl Render for Viewer {
                     cx.notify();
                 }),
             )
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .id("table-scroll")
-                            .size_full()
-                            .overflow_x_scroll()
-                            .track_scroll(&self.h_scroll)
-                            .child(table),
-                    )
-                    .children(vbar)
-                    .children(hbar),
-            )
-            .child(status)
+            .child(body)
+            .child(self.render_status())
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: csv_viewer <file.csv>");
-        std::process::exit(2);
-    };
-    let table = CsvTable::load(&path)?;
+fn main() {
+    let path = std::env::args_os().nth(1).map(PathBuf::from);
 
     Application::new().run(move |cx: &mut App| {
         setup_app(cx);
@@ -312,7 +401,10 @@ fn main() -> anyhow::Result<()> {
             },
             |window, cx| {
                 cx.new(|cx| {
-                    let viewer = Viewer::new(table, cx);
+                    let mut viewer = Viewer::new(cx);
+                    if let Some(path) = &path {
+                        viewer.open_path(path, window, cx);
+                    }
                     viewer.focus_handle.focus(window);
                     viewer
                 })
@@ -321,17 +413,17 @@ fn main() -> anyhow::Result<()> {
         .unwrap();
         cx.activate(true);
     });
-    Ok(())
 }
 
 /// 終了まわりの設定。GPUIは最後のウィンドウが閉じてもアプリを終了しないため、自前で扱う。
 fn setup_app(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
-    // CloseWindow はウィンドウ側（Viewer のルート要素）で受ける。
+    // CloseWindow / OpenFile はウィンドウ側（Viewer のルート要素）で受ける。
     // アクション処理中は当該ウィンドウが取り出されており、ここから window.update() はできない。
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-o", OpenFile, None),
     ]);
     cx.set_menus(vec![
         Menu {
@@ -340,7 +432,10 @@ fn setup_app(cx: &mut App) {
         },
         Menu {
             name: "File".into(),
-            items: vec![MenuItem::action("Close Window", CloseWindow)],
+            items: vec![
+                MenuItem::action("Open…", OpenFile),
+                MenuItem::action("Close Window", CloseWindow),
+            ],
         },
     ]);
     cx.on_window_closed(|cx| {
