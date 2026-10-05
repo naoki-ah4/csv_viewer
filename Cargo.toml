@@ -1,0 +1,11 @@
+[package]
+name = "csv_viewer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+chardetng = "1.0.0"
+csv = "1.4.0"
+encoding_rs = "0.8.42"
+gpui = "0.2.2"
