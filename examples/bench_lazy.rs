@@ -9,7 +9,7 @@
 #[path = "../src/csv_data.rs"]
 #[allow(dead_code)]
 mod csv_data;
-#[path = "../src/lazy_table.rs"]
+#[path = "../src/lazy_table/mod.rs"]
 #[allow(dead_code)]
 mod lazy_table;
 #[path = "../src/matcher.rs"]
