@@ -13,7 +13,7 @@ use crate::lazy_table::{IndexJob, IndexStatus, LazyTable};
 ///
 /// 決め手は最初の画面が出るまでの時間。全読み込みは約1.2倍のメモリで済むが、サイズに比例して
 /// 待たされる（M4 Pro で 43MB が約60ms。CPU が3倍遅くHDDなら、10〜20MB で体感できる待ちになる）。
-/// 遅延読み込みは、サイズに関わらず数十ms で最初の行が出る（1.8GB でも約30ms）。
+/// 遅延読み込みは、サイズに関わらず最初の行がすぐ読める（M4 Pro で 1.8GB でも数ms）。
 /// 環境変数 `CSV_VIEWER_LAZY_THRESHOLD`（バイト数）で上書きできる（動作確認・計測用）。
 const DEFAULT_LAZY_THRESHOLD: u64 = 16 * 1024 * 1024;
 const LAZY_THRESHOLD_ENV: &str = "CSV_VIEWER_LAZY_THRESHOLD";

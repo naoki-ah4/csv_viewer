@@ -1,6 +1,6 @@
 //! 遅延読み込みの計測。実ファイルを mmap で開き、索引作成の速度とセル取得の遅延を測る。
 //!
-//!   cargo run --release --example bench_lazy -- <file.csv>
+//!   cargo run --release --example bench_lazy -- <file.csv> [chunk_bytes]
 //!   /usr/bin/time -l cargo run --release --example bench_lazy -- <file.csv>   # ピークメモリも見る
 //!
 //! セルの中身は表示しない（件数と時間だけを出す）。
@@ -41,7 +41,10 @@ fn ms(d: Duration) -> f64 {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: bench_lazy <file.csv>");
+    let mut args = std::env::args().skip(1);
+    let path = args.next().expect("usage: bench_lazy <file.csv> [chunk_bytes]");
+    // 省略時は本体と同じ既定のチャンクの大きさ。
+    let chunk: Option<usize> = args.next().and_then(|a| a.parse().ok());
     let file = File::open(&path).unwrap();
     // SAFETY: 計測中に他のプロセスがファイルを変更しないことを前提とする。
     let mmap = unsafe { Mmap::map(&file).unwrap() };
@@ -53,10 +56,15 @@ fn main() {
     let rss_open = rss_mb();
 
     // 索引作成は別スレッドで走らせ、こちらでは表がいつから読めるようになるかを測る。
+    // 計測の起点は、`ps`（外部プロセスの起動で約20ms かかる）を呼び終えたあと。
+    let start = Instant::now();
     let cancel = Arc::new(AtomicBool::new(false));
     let handle = {
         let cancel = cancel.clone();
-        std::thread::spawn(move || job.run(&cancel))
+        std::thread::spawn(move || match chunk {
+            Some(chunk) => job.run_chunked(&cancel, chunk),
+            None => job.run(&cancel),
+        })
     };
     let mut first_row = None;
     let mut first_1000 = None;
