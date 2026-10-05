@@ -26,6 +26,28 @@ pub trait Unit {
     const WIDTH: usize;
     /// `pos` から1ユニット読む。`pos + WIDTH <= bytes.len()` が前提。
     fn read(bytes: &[u8], pos: usize) -> u32;
+
+    /// `from..to` で最初に現れる引用符の位置。
+    fn find_quote(bytes: &[u8], from: usize, to: usize) -> Option<usize> {
+        Self::find_where(bytes, from, to, |c| c == QUOTE)
+    }
+
+    /// `from..to` で最初に現れる、区切りか改行（`,` `\n` `\r`）の位置。
+    fn find_separator(bytes: &[u8], from: usize, to: usize) -> Option<usize> {
+        Self::find_where(bytes, from, to, |c| c == DELIM || c == LF || c == CR)
+    }
+
+    /// 1ユニットずつ調べる素朴な実装。1バイト単位の `Byte` は、これを SIMD に置き換える。
+    fn find_where(bytes: &[u8], from: usize, to: usize, found: impl Fn(u32) -> bool) -> Option<usize> {
+        let mut pos = from;
+        while pos + Self::WIDTH <= to {
+            if found(Self::read(bytes, pos)) {
+                return Some(pos);
+            }
+            pos += Self::WIDTH;
+        }
+        None
+    }
 }
 
 pub struct Byte;
@@ -37,6 +59,16 @@ impl Unit for Byte {
     #[inline(always)]
     fn read(bytes: &[u8], pos: usize) -> u32 {
         bytes[pos] as u32
+    }
+
+    // memchr は、実行時に CPU の機能を調べて、使える最速の命令（AVX2、SSE2、NEON など）を選び、
+    // どれも使えなければ移植可能な実装に戻る。特定の CPU は要らない。
+    fn find_quote(bytes: &[u8], from: usize, to: usize) -> Option<usize> {
+        memchr::memchr(b'"', &bytes[from..to]).map(|i| from + i)
+    }
+
+    fn find_separator(bytes: &[u8], from: usize, to: usize) -> Option<usize> {
+        memchr::memchr3(b',', b'\n', b'\r', &bytes[from..to]).map(|i| from + i)
     }
 }
 
@@ -110,15 +142,31 @@ impl Scanner {
     ) -> usize {
         let mut pos = from;
         while pos + U::WIDTH <= to {
+            // 引用符の中と、フィールドの途中は、次に意味を持つ文字まで一気に読み飛ばす。
+            // フィールドの途中の引用符は、ただの文字なので、探さなくてよい。
+            match self.state {
+                State::InQuoted => match U::find_quote(bytes, pos, to) {
+                    Some(found) => {
+                        self.state = State::QuoteInQuoted;
+                        pos = found + U::WIDTH;
+                        continue;
+                    }
+                    None => {
+                        pos = to - (to - pos) % U::WIDTH;
+                        break;
+                    }
+                },
+                State::InField => match U::find_separator(bytes, pos, to) {
+                    Some(found) => pos = found,
+                    None => {
+                        pos = to - (to - pos) % U::WIDTH;
+                        break;
+                    }
+                },
+                State::StartField | State::QuoteInQuoted => {}
+            }
             let c = U::read(bytes, pos);
             let next = pos + U::WIDTH;
-            if self.state == State::InQuoted {
-                if c == QUOTE {
-                    self.state = State::QuoteInQuoted;
-                }
-                pos = next;
-                continue;
-            }
             match c {
                 LF | CR => {
                     let record = self.has_content.then(|| Record {

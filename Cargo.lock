@@ -1277,6 +1277,7 @@ dependencies = [
  "csv",
  "encoding_rs",
  "gpui",
+ "memchr",
  "memmap2",
 ]
 
