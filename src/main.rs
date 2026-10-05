@@ -1,3 +1,4 @@
+mod cell_popup;
 mod csv_data;
 mod goto;
 mod lazy_table;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
-    ScrollWheelEvent, Task, Window, WindowBounds, WindowOptions, actions, canvas, div, point,
+    Rgba, ScrollWheelEvent, Task, Window, WindowBounds, WindowOptions, actions, canvas, div, point,
     prelude::*, px, rgb, rgba, size,
 };
 
@@ -43,6 +44,13 @@ actions!(
 );
 
 const ROW_HEIGHT: f32 = 24.0;
+/// ポップアップを出しているセルの背景色。
+const SELECTED_CELL_BG: Rgba = Rgba {
+    r: 0.81,
+    g: 0.89,
+    b: 0.98,
+    a: 1.0,
+};
 /// 列番号の行の高さ。ヘッダー行の上に置く。
 const COLNO_HEIGHT: f32 = 20.0;
 /// 縦スクロールしない部分（列番号の行とヘッダー行）の高さ。
@@ -62,6 +70,19 @@ const FAST_POLL_PERIOD: Duration = Duration::from_millis(500);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// 遅延読み込みできない文字コードのとき、全読み込みで開き直してよい最大サイズ。
 const EAGER_FALLBACK_LIMIT: u64 = 1024 * 1024 * 1024;
+
+/// クリックしたセルの全文を出すポップアップ。
+struct CellPopup {
+    /// データ行（0始まり）。ヘッダーのセルなら `None`。
+    row: Option<usize>,
+    col: usize,
+    /// クリックした位置（ウィンドウ座標）。ポップアップはこの近くに出す。
+    anchor: Point<Pixels>,
+    /// 表示する文字列（長すぎる場合は切り詰め済み）。
+    text: String,
+    /// 切り詰める前の文字数。
+    total_chars: usize,
+}
 
 #[derive(Clone, Copy)]
 struct Drag {
@@ -114,6 +135,8 @@ struct Viewer {
     loading: Option<String>,
     /// 「行へ移動」の入力欄。開いているあいだだけ `Some`。
     goto: Option<GotoInput>,
+    /// クリックしたセルの全文を出すポップアップ。
+    popup: Option<CellPopup>,
     /// ステータスバーに出す通知（範囲外の行への移動など）。次の操作で消える。
     notice: Option<String>,
     /// 実行中の読み込み。保持している間だけ動き、drop するとキャンセルされる。
@@ -141,6 +164,7 @@ impl Viewer {
             error: None,
             loading: None,
             goto: None,
+            popup: None,
             notice: None,
             load_task: None,
             index_task: None,
@@ -207,6 +231,7 @@ impl Viewer {
             Ok((loaded, job)) => {
                 self.stop_indexing();
                 self.goto = None;
+                self.popup = None;
                 self.notice = None;
                 self.loaded = Some(loaded);
                 self.scroll = ScrollPos::TOP;
@@ -336,11 +361,58 @@ impl Viewer {
 
     fn navigate(&mut self, nav: Nav, cx: &mut Context<Self>) {
         self.notice = None;
+        self.popup = None;
         let viewport_height = f32::from(self.viewport.get().size.height);
         self.scroll = self
             .scroll
             .navigated(nav, self.max_scroll(), viewport_height);
         cx.notify();
+    }
+
+    /// セルのクリックを受ける。同じセルをもう一度クリックすると閉じる。
+    fn open_cell_popup(
+        &mut self,
+        row: Option<usize>,
+        col: usize,
+        anchor: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        // 全体のクリックで閉じる処理（ルート要素）には、渡さない。
+        cx.stop_propagation();
+        if self.popup.as_ref().is_some_and(|p| p.row == row && p.col == col) {
+            self.popup = None;
+            cx.notify();
+            return;
+        }
+        let Some(loaded) = self.loaded.as_ref() else {
+            return;
+        };
+        let (text, total_chars) = {
+            let full = match row {
+                Some(row) => loaded.table.cell(row, col),
+                None => loaded.table.header(col),
+            };
+            cell_popup::truncate_chars(&full, cell_popup::MAX_CHARS)
+        };
+        self.popup = Some(CellPopup {
+            row,
+            col,
+            anchor,
+            text,
+            total_chars,
+        });
+        cx.notify();
+    }
+
+    /// セルのクリックを `open_cell_popup` へつなぐリスナー。
+    fn cell_click(
+        cx: &Context<Self>,
+        row: Option<usize>,
+        col: usize,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            this.open_cell_popup(row, col, event.position, cx)
+        })
     }
 
     /// 「行へ移動」の入力欄を開く。表が読み込まれていないときは何もしない。
@@ -354,6 +426,11 @@ impl Viewer {
     /// 入力欄が開いているときのキー入力を処理する。
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(input) = self.goto.as_mut() else {
+            if self.popup.is_some() && event.keystroke.key == "escape" {
+                self.popup = None;
+                cx.stop_propagation();
+                cx.notify();
+            }
             return;
         };
         let keystroke = &event.keystroke;
@@ -502,6 +579,8 @@ impl Viewer {
 
     fn render_table(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let loaded = self.loaded.as_ref().expect("render_table requires a loaded CSV");
+        // ポップアップを出しているセル。目立たせる。
+        let popup_cell = self.popup.as_ref().map(|p| (p.row, p.col));
         let header = div()
             .flex()
             .flex_row()
@@ -510,11 +589,11 @@ impl Viewer {
             .border_b_1()
             .border_color(rgb(0xcccccc))
             .font_weight(gpui::FontWeight::BOLD)
-            .children(
-                loaded.col_widths.iter().enumerate().map(|(i, w)| {
-                    cell(loaded.table.header(i).to_string(), *w)
-                }),
-            );
+            .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
+                cell(loaded.table.header(i).to_string(), *w)
+                    .when(popup_cell == Some((None, i)), |d| d.bg(SELECTED_CELL_BG))
+                    .on_mouse_down(MouseButton::Left, Self::cell_click(cx, None, i))
+            }));
         let colno = div()
             .flex()
             .flex_row()
@@ -551,6 +630,8 @@ impl Viewer {
                 .when(ix % 2 == 1, |d| d.bg(rgb(0xfafafa)))
                 .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
                     cell(loaded.table.cell(ix, i).to_string(), *w)
+                        .when(popup_cell == Some((Some(ix), i)), |d| d.bg(SELECTED_CELL_BG))
+                        .on_mouse_down(MouseButton::Left, Self::cell_click(cx, Some(ix), i))
                 }))
         });
         // 左端の行番号の欄。横にスクロールしても動かない。行の位置は、本体と同じ計算で揃える。
@@ -658,6 +739,7 @@ impl Viewer {
                 if dy != 0.0 {
                     // 下へ送る向き（delta.y が負）で、位置が増える。
                     this.notice = None;
+                    this.popup = None;
                     this.scroll = this.scroll.scrolled_by(-dy).clamped(this.max_scroll());
                     cx.notify();
                 }
@@ -666,6 +748,65 @@ impl Viewer {
             .child(div().flex_1().min_w_0().h_full().child(h_scroll_area))
             .children(vbar)
             .children(hbar)
+    }
+
+    /// クリックしたセルの全文。表の上に重ねて出す。
+    fn render_popup(&self, window: &Window) -> Option<impl IntoElement> {
+        let popup = self.popup.as_ref()?;
+        let window_size = window.viewport_size();
+        let (x, y) = cell_popup::place(
+            (f32::from(popup.anchor.x), f32::from(popup.anchor.y)),
+            (f32::from(window_size.width), f32::from(window_size.height)),
+            (cell_popup::WIDTH, cell_popup::MAX_HEIGHT),
+        );
+        let title = match popup.row {
+            Some(row) => format!("{} 行目 / {} 列目", row + 1, popup.col + 1),
+            None => format!("ヘッダー / {} 列目", popup.col + 1),
+        };
+        let truncated = (popup.total_chars > cell_popup::MAX_CHARS).then(|| {
+            format!(
+                "先頭 {} 文字のみ表示（全体 {} 文字）",
+                cell_popup::MAX_CHARS,
+                popup.total_chars
+            )
+        });
+        Some(
+            div()
+                .id("cell-popup")
+                // 背後の表がマウスやホイールを受け取らないようにする。
+                .occlude()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(cell_popup::WIDTH))
+                .max_h(px(cell_popup::MAX_HEIGHT))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(rgb(0xaaaaaa))
+                .rounded_md()
+                .shadow_lg()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x888888))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .id("cell-popup-body")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(popup.text.clone()),
+                )
+                .children(truncated.map(|note| {
+                    div().text_xs().text_color(rgb(0xb06000)).child(note)
+                })),
+        )
     }
 
     /// 「行へ移動」の入力欄。表の上に重ねて出す。
@@ -822,7 +963,7 @@ fn display_width(s: &str) -> usize {
     s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
-fn cell(text: String, width: f32) -> impl IntoElement {
+fn cell(text: String, width: f32) -> gpui::Div {
     div()
         .w(px(width))
         .flex_shrink_0()
@@ -865,6 +1006,15 @@ impl Render for Viewer {
                 this.handle_key_down(event, cx)
             }))
             .on_action(cx.listener(|this, _: &GotoRow, _, cx| this.open_goto(cx)))
+            // セルとポップアップ以外のクリックで、ポップアップを閉じる。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.popup.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
             .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| this.navigate(Nav::LineUp, cx)))
@@ -901,6 +1051,7 @@ impl Render for Viewer {
             .child(body)
             .child(self.render_status())
             .children(self.render_goto())
+            .children(self.render_popup(window))
     }
 }
 
