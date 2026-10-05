@@ -20,13 +20,31 @@ use gpui::{
 };
 
 use lazy_table::{IndexJob, IndexStatus};
-use scroll_pos::ScrollPos;
+use scroll_pos::{Nav, ScrollPos};
 use scrollbar::{Axis, AxisState};
 use table::Table;
 
-actions!(csv_viewer, [Quit, CloseWindow, OpenFile]);
+actions!(
+    csv_viewer,
+    [
+        Quit,
+        CloseWindow,
+        OpenFile,
+        ScrollLineUp,
+        ScrollLineDown,
+        ScrollPageUp,
+        ScrollPageDown,
+        ScrollToTop,
+        ScrollToBottom,
+    ]
+);
 
 const ROW_HEIGHT: f32 = 24.0;
+/// 列番号の行の高さ。ヘッダー行の上に置く。
+const COLNO_HEIGHT: f32 = 20.0;
+/// 縦スクロールしない部分（列番号の行とヘッダー行）の高さ。
+const HEADER_HEIGHT: f32 = COLNO_HEIGHT + ROW_HEIGHT;
+const MIN_GUTTER_WIDTH: f32 = 40.0;
 const MIN_COL_WIDTH: f32 = 60.0;
 const MAX_COL_WIDTH: f32 = 400.0;
 const CHAR_WIDTH: f32 = 7.5;
@@ -299,6 +317,19 @@ impl Viewer {
         self.loaded.as_ref().map_or(0, |l| l.table.row_count())
     }
 
+    /// 行番号の欄の幅。行数の桁数で決まる。
+    fn gutter_width(&self) -> f32 {
+        gutter_width(self.row_count())
+    }
+
+    fn navigate(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        let viewport_height = f32::from(self.viewport.get().size.height);
+        self.scroll = self
+            .scroll
+            .navigated(nav, self.max_scroll(), viewport_height);
+        cx.notify();
+    }
+
     /// 縦に動かせる上限（最後の行が領域の下端に揃う位置）。
     fn max_scroll(&self) -> ScrollPos {
         ScrollPos::max(self.row_count(), self.viewport.get().size.height.into())
@@ -363,7 +394,7 @@ impl Viewer {
                 "vbar",
                 div()
                     .absolute()
-                    .top(px(ROW_HEIGHT) + thumb.pos)
+                    .top(px(HEADER_HEIGHT) + thumb.pos)
                     .right(px(scrollbar::MARGIN))
                     .w(px(scrollbar::THICKNESS))
                     .h(thumb.len),
@@ -372,7 +403,7 @@ impl Viewer {
                 "hbar",
                 div()
                     .absolute()
-                    .left(thumb.pos)
+                    .left(px(self.gutter_width()) + thumb.pos)
                     .bottom(px(scrollbar::MARGIN))
                     .h(px(scrollbar::THICKNESS))
                     .w(thumb.len),
@@ -422,8 +453,23 @@ impl Viewer {
                     cell(loaded.table.header(i).to_string(), *w)
                 }),
             );
+        let colno = div()
+            .flex()
+            .flex_row()
+            .h(px(COLNO_HEIGHT))
+            .bg(rgb(0xe8e8e8))
+            .text_xs()
+            .text_color(rgb(0x888888))
+            .children(
+                loaded
+                    .col_widths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| cell((i + 1).to_string(), *w)),
+            );
         let total_width: f32 = loaded.col_widths.iter().sum();
         let row_count = loaded.table.row_count();
+        let gutter_width = gutter_width(row_count);
 
         // 縦は自前で仮想スクロールする。全体の座標（数億px）は使わず、見えている先頭行の番号と、
         // その行の中でのずれ（0〜行の高さ）だけで位置を持つ。各行の位置が小さな値になるので、
@@ -445,20 +491,54 @@ impl Viewer {
                     cell(loaded.table.cell(ix, i).to_string(), *w)
                 }))
         });
+        // 左端の行番号の欄。横にスクロールしても動かない。行の位置は、本体と同じ計算で揃える。
+        let gutter_rows = (visible.first..visible.last).map(|ix| {
+            div()
+                .flex()
+                .flex_row()
+                .flex_shrink_0()
+                .justify_end()
+                .w(px(gutter_width))
+                .h(px(ROW_HEIGHT))
+                .px_2()
+                .text_color(rgb(0x888888))
+                .bg(rgb(if ix % 2 == 1 { 0xf0f0f0 } else { 0xf6f6f6 }))
+                .child((ix + 1).to_string())
+        });
+        let gutter = div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .w(px(gutter_width))
+            .h_full()
+            .border_r_1()
+            .border_color(rgb(0xcccccc))
+            .child(
+                div()
+                    .w(px(gutter_width))
+                    .h(px(HEADER_HEIGHT))
+                    .flex_shrink_0()
+                    .bg(rgb(0xe8e8e8))
+                    .border_b_1()
+                    .border_color(rgb(0xcccccc)),
+            )
+            .child(
+                div().relative().flex_1().min_h_0().overflow_hidden().child(
+                    div()
+                        .relative()
+                        .top(px(-visible.offset))
+                        .flex()
+                        .flex_col()
+                        .children(gutter_rows),
+                ),
+            );
+
         let viewport = self.viewport.clone();
         let list = div()
             .relative()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                let dy = f64::from(f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y));
-                if dy != 0.0 {
-                    // 下へ送る向き（delta.y が負）で、位置が増える。
-                    this.scroll = this.scroll.scrolled_by(-dy).clamped(this.max_scroll());
-                    cx.notify();
-                }
-            }))
             // 行を描く領域の大きさを、次の描画のために控えておく。
             .child(
                 canvas(move |bounds, _, _| viewport.set(bounds), |_, _, _, _| {})
@@ -481,6 +561,7 @@ impl Viewer {
             .h_full()
             .min_w(px(total_width))
             .w_full()
+            .child(colno)
             .child(header)
             .child(list);
 
@@ -507,7 +588,19 @@ impl Viewer {
             .relative()
             .flex_1()
             .min_h_0()
-            .child(h_scroll_area)
+            .flex()
+            .flex_row()
+            // 縦のホイールは、行番号の欄の上でも効くよう、全体で受ける。
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                let dy = f64::from(f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y));
+                if dy != 0.0 {
+                    // 下へ送る向き（delta.y が負）で、位置が増える。
+                    this.scroll = this.scroll.scrolled_by(-dy).clamped(this.max_scroll());
+                    cx.notify();
+                }
+            }))
+            .child(gutter)
+            .child(div().flex_1().min_w_0().h_full().child(h_scroll_area))
             .children(vbar)
             .children(hbar)
     }
@@ -565,6 +658,12 @@ fn visible_rows(scroll: ScrollPos, viewport_height: f32, row_count: usize) -> Vi
         last: first.saturating_add(count).min(row_count),
         offset,
     }
+}
+
+/// 行番号の欄の幅。行数の桁数に合わせる（桁が増えるときだけ広がる）。
+fn gutter_width(row_count: usize) -> f32 {
+    let digits = row_count.max(1).to_string().len();
+    (digits as f32 * CHAR_WIDTH + CELL_PADDING).max(MIN_GUTTER_WIDTH)
 }
 
 fn file_name(path: &Path) -> String {
@@ -643,6 +742,12 @@ impl Render for Viewer {
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
+            .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| this.navigate(Nav::LineUp, cx)))
+            .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| this.navigate(Nav::LineDown, cx)))
+            .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| this.navigate(Nav::PageUp, cx)))
+            .on_action(cx.listener(|this, _: &ScrollPageDown, _, cx| this.navigate(Nav::PageDown, cx)))
+            .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| this.navigate(Nav::Top, cx)))
+            .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| this.navigate(Nav::Bottom, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.paths().first() {
                     this.open_path(path.clone(), window, cx);
@@ -710,6 +815,14 @@ fn setup_app(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-o", OpenFile, None),
+        KeyBinding::new("up", ScrollLineUp, None),
+        KeyBinding::new("down", ScrollLineDown, None),
+        KeyBinding::new("pageup", ScrollPageUp, None),
+        KeyBinding::new("pagedown", ScrollPageDown, None),
+        KeyBinding::new("home", ScrollToTop, None),
+        KeyBinding::new("end", ScrollToBottom, None),
+        KeyBinding::new("cmd-up", ScrollToTop, None),
+        KeyBinding::new("cmd-down", ScrollToBottom, None),
     ]);
     cx.set_menus(vec![
         Menu {
@@ -873,4 +986,18 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_row_number_gutter_grows_with_the_number_of_digits() {
+        assert_eq!(gutter_width(0), MIN_GUTTER_WIDTH);
+        assert_eq!(gutter_width(9), gutter_width(1));
+        assert_eq!(gutter_width(99), gutter_width(10));
+        assert!(gutter_width(1_000_000) > gutter_width(999));
+        assert_eq!(
+            gutter_width(30_466_333),
+            8.0 * CHAR_WIDTH + CELL_PADDING,
+            "eight digits"
+        );
+    }
 }
+

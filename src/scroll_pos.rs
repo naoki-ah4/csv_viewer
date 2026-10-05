@@ -10,6 +10,17 @@
 
 use crate::ROW_HEIGHT;
 
+/// キーボードによる縦の移動。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
 /// 位置の大小は、`row`、`offset` の順の辞書式で決まる（`offset` は行の高さ未満に保つ）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct ScrollPos {
@@ -64,6 +75,28 @@ impl ScrollPos {
         Self::normalized(row, total - carry * height)
     }
 
+    /// キーボードによる移動を適用する。結果は常に行の境界（`offset` が0）にそろう。
+    /// ホイールやトラックパッドだけが、行の途中までなめらかに動く（`scrolled_by`）。
+    ///
+    /// ページ送りは、領域に収まる行数から1行引いた行数ぶん動かす（前後のつながりが分かるよう、
+    /// 1行ぶん重ねる）。ただし末尾では、最後の行が領域の下端に揃う位置（`max`）で止まる。
+    pub fn navigated(self, nav: Nav, max: Self, viewport_height: f32) -> Self {
+        let visible_rows = (viewport_height.max(0.0) / ROW_HEIGHT).floor() as usize;
+        let page_rows = visible_rows.saturating_sub(1).max(1);
+        let at_row = |row: usize| Self { row, offset: 0.0 };
+        match nav {
+            // 行の途中にいるときの `↑` は、その行の先頭へ戻る。
+            Nav::LineUp if self.offset > 0.0 => at_row(self.row),
+            Nav::LineUp => at_row(self.row.saturating_sub(1)),
+            Nav::LineDown => at_row(self.row.saturating_add(1)),
+            Nav::PageUp => at_row(self.row.saturating_sub(page_rows)),
+            Nav::PageDown => at_row(self.row.saturating_add(page_rows)),
+            Nav::Top => Self::TOP,
+            Nav::Bottom => max,
+        }
+        .clamped(max)
+    }
+
     /// `offset` が行の高さに丸められて届いてしまう場合を、繰り上げて整える。
     fn normalized(row: usize, offset: f64) -> Self {
         let offset = offset.max(0.0) as f32;
@@ -106,6 +139,10 @@ mod tests {
     use super::*;
 
     const H: f64 = ROW_HEIGHT as f64;
+
+    fn pos(row: usize, offset: f32) -> ScrollPos {
+        ScrollPos { row, offset }
+    }
 
     fn px_of(pos: ScrollPos) -> f64 {
         pos.row as f64 * H + f64::from(pos.offset)
@@ -222,4 +259,72 @@ mod tests {
         assert_eq!(ScrollPos::TOP.fraction(max), 0.0);
         assert_eq!(ScrollPos::from_fraction(0.7, max), ScrollPos::TOP);
     }
+
+    #[test]
+    fn navigation_moves_by_whole_rows_and_to_the_ends() {
+        let max = ScrollPos::max(1_000, 700.0);
+        let nav = |pos: ScrollPos, n| pos.navigated(n, max, 700.0);
+
+        assert_eq!(nav(ScrollPos::TOP, Nav::LineDown), pos(1, 0.0));
+        assert_eq!(nav(ScrollPos::TOP, Nav::LineUp), ScrollPos::TOP);
+        // 高さ700pxには29行入る。ページ送りは、1行重ねて28行ぶん（672px）。
+        let page = nav(ScrollPos::TOP, Nav::PageDown);
+        assert_eq!(page, pos(28, 0.0));
+        assert_eq!(nav(page, Nav::PageUp), ScrollPos::TOP);
+        assert_eq!(nav(page, Nav::Top), ScrollPos::TOP);
+        assert_eq!(nav(ScrollPos::TOP, Nav::Bottom), max);
+    }
+
+    #[test]
+    fn keyboard_navigation_snaps_to_a_row_boundary() {
+        let max = ScrollPos::max(1_000, 700.0);
+        let nav = |p: ScrollPos, n| p.navigated(n, max, 700.0);
+        // ホイールで行の途中に止まっていても、キーで動かすと、行の境界にそろう。
+        let mid = pos(10, 5.5);
+        assert_eq!(nav(mid, Nav::LineDown), pos(11, 0.0));
+        assert_eq!(nav(mid, Nav::LineUp), pos(10, 0.0), "up returns to the row start first");
+        assert_eq!(nav(pos(10, 0.0), Nav::LineUp), pos(9, 0.0));
+        assert_eq!(nav(mid, Nav::PageDown), pos(38, 0.0));
+        assert_eq!(nav(mid, Nav::PageUp), pos(0, 0.0));
+        // どの結果も、行の境界にそろっている。
+        for n in [Nav::LineUp, Nav::LineDown, Nav::PageUp, Nav::PageDown, Nav::Top] {
+            assert_eq!(nav(mid, n).offset, 0.0, "{n:?}");
+        }
+    }
+
+    #[test]
+    fn paging_stops_at_the_bottom_edge_not_a_row_boundary() {
+        // 末尾では、最後の行が下端に揃う位置で止まる。そこは行の境界とは限らない。
+        let max = ScrollPos::max(100, 100.0);
+        assert!(max.offset > 0.0);
+        let near = pos(max.row - 1, 0.0);
+        assert_eq!(near.navigated(Nav::PageDown, max, 100.0), max);
+        // 1行下げただけでは、まだ末尾に届かない。行の境界に止まる。
+        let next = near.navigated(Nav::LineDown, max, 100.0);
+        assert_eq!(next, pos(max.row, 0.0));
+        // もう1行下げると、下端に揃う位置で止まり、それ以上は動かない。
+        assert_eq!(next.navigated(Nav::LineDown, max, 100.0), max);
+        assert_eq!(max.navigated(Nav::LineDown, max, 100.0), max);
+    }
+
+    #[test]
+    fn navigation_never_passes_the_ends() {
+        let max = ScrollPos::max(100, 600.0);
+        assert_eq!(max.navigated(Nav::LineDown, max, 600.0), max);
+        assert_eq!(max.navigated(Nav::PageDown, max, 600.0), max);
+        assert_eq!(ScrollPos::TOP.navigated(Nav::PageUp, max, 600.0), ScrollPos::TOP);
+        // 全体が収まるなら、どこへも動かない。
+        let tiny = ScrollPos::max(3, 600.0);
+        for n in [Nav::LineDown, Nav::PageDown, Nav::Bottom, Nav::Top, Nav::LineUp] {
+            assert_eq!(ScrollPos::TOP.navigated(n, tiny, 600.0), ScrollPos::TOP);
+        }
+    }
+
+    #[test]
+    fn a_tiny_viewport_still_pages_by_at_least_one_row() {
+        let max = ScrollPos::max(100, 10.0);
+        let moved = ScrollPos::TOP.navigated(Nav::PageDown, max, 10.0);
+        assert_eq!(moved, ScrollPos { row: 1, offset: 0.0 });
+    }
 }
+
