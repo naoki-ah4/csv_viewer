@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use gpui::{
     App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, Menu, MenuItem,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
-    UniformListScrollHandle, Window, WindowBounds, WindowOptions, actions, div, point,
+    Task, UniformListScrollHandle, Window, WindowBounds, WindowOptions, actions, div, point,
     prelude::*, px, rgb, rgba, size, uniform_list,
 };
 
@@ -38,6 +38,10 @@ struct Viewer {
     loaded: Option<Loaded>,
     /// 直近の読み込み失敗など、ステータスバーに出すメッセージ。
     error: Option<String>,
+    /// 読み込み中のファイル名。
+    loading: Option<String>,
+    /// 実行中の読み込み。保持している間だけ動き、drop するとキャンセルされる。
+    load_task: Option<Task<()>>,
     list_scroll: UniformListScrollHandle,
     h_scroll: ScrollHandle,
     drag: Option<Drag>,
@@ -49,6 +53,8 @@ impl Viewer {
         Self {
             loaded: None,
             error: None,
+            loading: None,
+            load_task: None,
             list_scroll: UniformListScrollHandle::new(),
             h_scroll: ScrollHandle::new(),
             drag: None,
@@ -56,23 +62,50 @@ impl Viewer {
         }
     }
 
-    /// CSVを読み込んで表示を差し替える。失敗時は直前の表示を残し、メッセージだけ出す。
-    fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        match CsvTable::load(path) {
-            Ok(table) => {
+    /// CSVをバックグラウンドで読み込み、終わったら表示を差し替える。
+    /// 読み込み中は直前の表示を残す。別のファイルを開くと、前の読み込みは破棄される。
+    fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.loading = Some(file_name(&path));
+        self.error = None;
+
+        let load = cx.background_spawn({
+            let path = path.clone();
+            async move {
+                let table = CsvTable::load(&path)?;
                 let col_widths = column_widths(&table);
-                self.loaded = Some(Loaded { table, col_widths });
-                self.error = None;
+                anyhow::Ok(Loaded { table, col_widths })
+            }
+        });
+        // 古い Task は代入時に drop され、キャンセルされる。
+        self.load_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            this.update_in(cx, |this, window, cx| {
+                this.finish_load(&path, result, window, cx)
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// 読み込み結果を反映する。失敗時は直前の表示を残し、メッセージだけ出す。
+    fn finish_load(
+        &mut self,
+        path: &Path,
+        result: anyhow::Result<Loaded>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.loading = None;
+        match result {
+            Ok(loaded) => {
+                self.loaded = Some(loaded);
                 self.list_scroll
                     .0
                     .borrow()
                     .base_handle
                     .set_offset(point(px(0.), px(0.)));
                 self.h_scroll.set_offset(point(px(0.), px(0.)));
-                let name = path
-                    .file_name()
-                    .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy());
-                window.set_window_title(&name);
+                window.set_window_title(&file_name(path));
             }
             Err(e) => {
                 self.error = Some(format!("開けませんでした: {} ({e})", path.display()));
@@ -92,7 +125,9 @@ impl Viewer {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
             };
-            let Some(path) = paths.first() else { return };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
             this.update_in(cx, |this, window, cx| this.open_path(path, window, cx))
                 .ok();
         })
@@ -271,15 +306,16 @@ impl Viewer {
     }
 
     fn render_status(&self) -> impl IntoElement {
-        let text = match (&self.error, &self.loaded) {
-            (Some(error), _) => error.clone(),
-            (None, Some(l)) => format!(
+        let text = match (&self.error, &self.loading, &self.loaded) {
+            (Some(error), _, _) => error.clone(),
+            (None, Some(name), _) => format!("読み込み中… {name}"),
+            (None, None, Some(l)) => format!(
                 "{} 行 / {} 列 / {}",
                 l.table.row_count(),
                 l.col_widths.len(),
                 l.table.encoding.name()
             ),
-            (None, None) => String::new(),
+            (None, None, None) => String::new(),
         };
         div()
             .h(px(ROW_HEIGHT))
@@ -291,6 +327,12 @@ impl Viewer {
             .when(self.error.is_some(), |d| d.text_color(rgb(0xb00020)))
             .child(text)
     }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy())
+        .into_owned()
 }
 
 fn axis_value(axis: Axis, p: Point<Pixels>) -> Pixels {
@@ -344,6 +386,9 @@ impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = if self.loaded.is_some() {
             self.render_table(window, cx).into_any_element()
+        } else if self.loading.is_some() {
+            // 初回の読み込み中は、案内文を出さない（小さいファイルだとちらつくため）。
+            div().flex_1().into_any_element()
         } else {
             self.render_empty().into_any_element()
         };
@@ -360,7 +405,7 @@ impl Render for Viewer {
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.paths().first() {
-                    this.open_path(path, window, cx);
+                    this.open_path(path.clone(), window, cx);
                 }
             }))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xe8f0fe)))
@@ -404,7 +449,7 @@ fn main() {
                 cx.new(|cx| {
                     let mut viewer = Viewer::new(cx);
                     if let Some(path) = &path {
-                        viewer.open_path(path, window, cx);
+                        viewer.open_path(path.clone(), window, cx);
                     }
                     viewer.focus_handle.focus(window);
                     viewer
