@@ -14,15 +14,13 @@ mod table;
 mod text_input;
 mod text_select;
 mod viewer;
+mod windows;
 
 use std::path::PathBuf;
 
-use gpui::{
-    App, Application, Bounds, Menu, MenuItem, WindowBounds, WindowOptions, prelude::*, px, size,
-};
+use gpui::{App, Application, Menu, MenuItem};
 
 use actions::{CloseWindow, FindInTable, GotoRow, OpenFile, Quit, app_key_bindings};
-use viewer::Viewer;
 
 fn main() {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
@@ -39,41 +37,23 @@ fn main() {
     app.run(move |cx: &mut App| {
         setup_app(cx);
 
-        let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    cx.new(|cx| {
-                        let mut viewer = Viewer::new(cx);
-                        if let Some(path) = &path {
-                            viewer.open_path(path.clone(), window, cx);
-                        }
-                        viewer.focus(window);
-                        viewer
-                    })
-                },
-            )
-            .unwrap();
+        windows::open_paths(path.into_iter().collect(), cx);
         cx.activate(true);
 
         cx.spawn(async move |cx| {
             use futures::StreamExt;
             while let Some(urls) = open_rx.next().await {
-                let Some(path) = open_url::first_path(&urls) else {
+                let paths = open_url::all_paths(&urls);
+                if paths.is_empty() {
                     eprintln!("csv_viewer: ignoring open request: {urls:?}");
                     continue;
-                };
-                eprintln!("csv_viewer: open {}", path.display());
-                window
-                    .update(cx, |viewer, window, cx| {
-                        window.activate_window();
-                        viewer.open_path(path, window, cx);
-                    })
-                    .ok();
+                }
+                eprintln!("csv_viewer: open {paths:?}");
+                cx.update(|cx| {
+                    windows::open_paths(paths, cx);
+                    cx.activate(true);
+                })
+                .ok();
             }
         })
         .detach();

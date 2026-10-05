@@ -434,10 +434,9 @@ impl Render for Viewer {
             .on_action(
                 cx.listener(|this, _: &ExtendToLast, _, cx| this.extend_selection(Step::Last, cx)),
             )
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                if let Some(path) = paths.paths().first() {
-                    this.open_path(path.clone(), window, cx);
-                }
+            .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
+                let paths = paths.paths().to_vec();
+                cx.defer(move |cx| crate::windows::open_paths(paths, cx));
             }))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xe8f0fe)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {

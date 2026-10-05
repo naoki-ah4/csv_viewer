@@ -175,18 +175,18 @@ impl Viewer {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
             };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            this.update_in(cx, |this, window, cx| this.open_path(path, window, cx))
-                .ok();
+            // このウィンドウの更新が終わってから開く（空のウィンドウを探すとき、このウィンドウも見るため）。
+            this.update_in(cx, |_, _, cx| {
+                cx.defer(move |cx| crate::windows::open_paths(paths, cx))
+            })
+            .ok();
         })
         .detach();
     }

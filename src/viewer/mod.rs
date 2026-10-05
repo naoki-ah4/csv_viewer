@@ -289,6 +289,12 @@ impl Viewer {
         ScrollPos::max(self.row_count(), self.viewport.get().size.height.into())
     }
 
+    /// まだ何も開いていない（読み込み中でも、失敗の表示中でもない）か。
+    /// 空のウィンドウは、次に開くファイルに使い回す。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.loaded.is_none() && self.loading.is_none() && self.error.is_none()
+    }
+
     /// 表のフォーカスを、この画面に移す。
     pub(crate) fn focus(&self, window: &mut Window) {
         self.focus_handle.focus(window);

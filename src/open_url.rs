@@ -14,9 +14,9 @@ pub fn path_from_url(url: &str) -> Option<PathBuf> {
     url::Url::parse(url).ok()?.to_file_path().ok()
 }
 
-/// 届いた URL の中から、最初に開けそうなパスを取り出す。
-pub fn first_path(urls: &[String]) -> Option<PathBuf> {
-    urls.iter().find_map(|u| path_from_url(u))
+/// 届いた URL の中から、開けそうなパスを、届いた順にすべて取り出す。
+pub fn all_paths(urls: &[String]) -> Vec<PathBuf> {
+    urls.iter().filter_map(|u| path_from_url(u)).collect()
 }
 
 #[cfg(test)]
@@ -87,13 +87,16 @@ mod tests {
     }
 
     #[test]
-    fn the_first_usable_url_wins() {
+    fn every_usable_url_is_kept_in_order() {
         let urls = vec![
             "https://example.com/x.csv".to_string(),
             "file:///a/one.csv".to_string(),
             "file:///a/two.csv".to_string(),
         ];
-        assert_eq!(first_path(&urls).as_deref(), Some(Path::new("/a/one.csv")));
-        assert_eq!(first_path(&[]), None);
+        assert_eq!(
+            all_paths(&urls),
+            vec![Path::new("/a/one.csv"), Path::new("/a/two.csv")]
+        );
+        assert!(all_paths(&[]).is_empty());
     }
 }
