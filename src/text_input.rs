@@ -90,6 +90,21 @@ pub struct TextInput {
 }
 
 impl TextInput {
+    /// 内容が外から変わって（検索欄を空にするなど）、古くなった範囲を、内容の中に収める。
+    /// 変換中の範囲が残ったまま内容が空になると、範囲が内容の外を指して、文字列の切り出しで落ちる。
+    fn clamped(&self, range: Range<usize>) -> Range<usize> {
+        let len = self.content.len();
+        let fix = |mut i: usize| {
+            i = i.min(len);
+            while !self.content.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let start = fix(range.start);
+        start..fix(range.end).max(start)
+    }
+
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
@@ -391,6 +406,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.clamped(range);
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -415,6 +431,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.clamped(range);
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
