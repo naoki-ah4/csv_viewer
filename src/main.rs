@@ -1,4 +1,5 @@
 mod csv_data;
+mod record_index;
 mod scrollbar;
 mod table;
 
