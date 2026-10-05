@@ -6,14 +6,20 @@
 //! full_scan_detect は、ファイル全体を chardetng に通した場合の参考値（現在の実装は先頭の一部だけ）。
 //! 生成した入力データ（size_mb 分）もメモリに載るため、ピークRSSからその分を引いて読むこと。
 
-#[path = "../src/csv_data.rs"]
+#[path = "../src/matcher.rs"]
 #[allow(dead_code)]
-mod csv_data;
+mod matcher;
+#[path = "../src/search.rs"]
+#[allow(dead_code)]
+mod search;
+#[path = "../src/table/mod.rs"]
+#[allow(dead_code)]
+mod table;
 
 use std::time::Instant;
 
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
-use csv_data::CsvTable;
+use table::eager::CsvTable;
 
 /// BENCH_RUNS=1 にすると1回だけ実行する（ピークメモリを測るときは、前回の結果が残らないようこちらを使う）。
 fn runs() -> usize {

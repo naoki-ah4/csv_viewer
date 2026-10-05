@@ -1,13 +1,10 @@
 mod actions;
 mod cell_popup;
-mod csv_data;
 mod drag_scroll;
 mod encodings;
 mod goto;
-mod lazy_table;
 mod matcher;
 mod open_url;
-mod record_index;
 mod reveal;
 mod scroll_pos;
 mod scrollbar;

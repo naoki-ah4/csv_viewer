@@ -3,28 +3,25 @@
 //!
 //!   cargo run --release --example bench_search -- <file.csv>
 
-#[path = "../src/csv_data.rs"]
-#[allow(dead_code)]
-mod csv_data;
-#[path = "../src/lazy_table/mod.rs"]
-#[allow(dead_code)]
-mod lazy_table;
 #[path = "../src/matcher.rs"]
 #[allow(dead_code)]
 mod matcher;
-#[path = "../src/record_index.rs"]
+#[path = "../src/search.rs"]
 #[allow(dead_code)]
-mod record_index;
+mod search;
+#[path = "../src/table/mod.rs"]
+#[allow(dead_code)]
+mod table;
 
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use lazy_table::LazyTable;
 use matcher::{Direction, Matcher, Outcome};
 use memchr::memchr;
 use memmap2::Mmap;
+use table::lazy::LazyTable;
 
 fn main() {
     let path = std::env::args()

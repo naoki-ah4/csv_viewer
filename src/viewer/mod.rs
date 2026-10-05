@@ -24,13 +24,13 @@ use gpui::{
 };
 
 use crate::goto::{GotoInput, GotoKey};
-use crate::lazy_table::{IndexJob, IndexStatus};
 use crate::matcher::{Direction, Matcher, Outcome};
 use crate::scroll_pos::{Nav, ROW_HEIGHT, ScrollPos};
 use crate::scrollbar::{Axis, AxisState};
 use crate::search::Match;
 use crate::selection::{CellPos, Selection, Step};
 use crate::table::Table;
+use crate::table::lazy::{IndexJob, IndexStatus};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::text_select::TextSelection;
 use crate::{
@@ -291,8 +291,8 @@ impl Viewer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::csv_data;
-    use crate::lazy_table::LazyTable;
+    use crate::table::eager::CsvTable;
+    use crate::table::lazy::LazyTable;
 
     fn lazy(text: &str) -> (Loaded, IndexJob) {
         let (table, job) = LazyTable::open(Arc::new(text.as_bytes().to_vec()), None);
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn eager_tables_never_need_a_recompute() {
-        let table = Table::Eager(csv_data::CsvTable::from_bytes(b"a,b\n1,2\n").unwrap());
+        let table = Table::Eager(CsvTable::from_bytes(b"a,b\n1,2\n").unwrap());
         let mut loaded = Loaded::new(table);
         assert!(!loaded.refresh_widths());
     }

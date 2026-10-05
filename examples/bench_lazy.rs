@@ -6,26 +6,23 @@
 //! セルの中身は表示しない（件数と時間だけを出す）。
 //! OS のページキャッシュの状態で、初回と2回目以降の速度が変わる点に注意。
 
-#[path = "../src/csv_data.rs"]
-#[allow(dead_code)]
-mod csv_data;
-#[path = "../src/lazy_table/mod.rs"]
-#[allow(dead_code)]
-mod lazy_table;
 #[path = "../src/matcher.rs"]
 #[allow(dead_code)]
 mod matcher;
-#[path = "../src/record_index.rs"]
+#[path = "../src/search.rs"]
 #[allow(dead_code)]
-mod record_index;
+mod search;
+#[path = "../src/table/mod.rs"]
+#[allow(dead_code)]
+mod table;
 
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use lazy_table::{IndexStatus, LazyTable};
 use memmap2::Mmap;
+use table::lazy::{IndexStatus, LazyTable};
 
 fn rss_mb() -> f64 {
     let out = std::process::Command::new("ps")
@@ -116,7 +113,7 @@ fn main() {
     );
     println!(
         "sparse index    : ~{:.1} MB",
-        (rows / record_index::STRIDE + 1) as f64 * 8.0 / 1024.0 / 1024.0
+        (rows / table::lazy::index::STRIDE + 1) as f64 * 8.0 / 1024.0 / 1024.0
     );
     println!("rss             : after open {rss_open:.0} MB, after index {rss_indexed:.0} MB");
 

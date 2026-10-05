@@ -1,3 +1,7 @@
+pub(crate) mod eager;
+mod encoding;
+pub(crate) mod lazy;
+
 use std::borrow::Cow;
 use std::fs::File;
 use std::path::Path;
@@ -7,10 +11,9 @@ use std::sync::atomic::AtomicBool;
 use encoding_rs::Encoding;
 use memmap2::Mmap;
 
-use crate::csv_data::CsvTable;
-use crate::lazy_table::{IndexJob, IndexStatus, LazySearcher, LazyTable};
 use crate::matcher::{Direction, Matcher, Outcome};
-use crate::search;
+use eager::CsvTable;
+use lazy::{IndexJob, IndexStatus, LazySearcher, LazyTable};
 
 /// これ以上のサイズのファイルは、全体を読み込まず遅延読み込みで開く。
 ///
@@ -119,7 +122,7 @@ impl Table {
         cancel: &AtomicBool,
     ) -> Outcome<usize> {
         match self {
-            Self::Eager(t) => search::find_row_in_csv(t, matcher, from_row, dir, cancel),
+            Self::Eager(t) => t.find_row(matcher, from_row, dir, cancel),
             Self::Lazy(t) => t.searcher().find_row(matcher, from_row, dir, cancel),
         }
     }

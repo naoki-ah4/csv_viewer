@@ -5,9 +5,8 @@
 //!   候補を絞り、セルの中身で確かめる（`lazy_table::LazySearcher`）。どちらも同じ結果を返す。
 //! - 検索語の判定は `matcher` にある。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
-use crate::csv_data::CsvTable;
 use crate::matcher::{Direction, Matcher, Outcome};
 use crate::table::Table;
 
@@ -36,43 +35,6 @@ impl Match {
             None
         }
     }
-}
-
-/// 全読み込みの表で、`from_row` 以降（前向き）、または `from_row` より前（後ろ向き）の、
-/// 最初に一致する行を探す。全セルを順に調べる。
-pub fn find_row_in_csv(
-    table: &CsvTable,
-    matcher: &Matcher,
-    from_row: usize,
-    dir: Direction,
-    cancel: &AtomicBool,
-) -> Outcome<usize> {
-    let columns = table.column_count();
-    let row_matches = |row: usize| (0..columns).any(|col| matcher.is_match(table.cell(row, col)));
-    let check = |row: usize, step: usize| row % step == 0 && cancel.load(Ordering::Relaxed);
-    match dir {
-        Direction::Forward => {
-            for row in from_row..table.row_count() {
-                if check(row, 1024) {
-                    return Outcome::Cancelled;
-                }
-                if row_matches(row) {
-                    return Outcome::Found(row);
-                }
-            }
-        }
-        Direction::Backward => {
-            for row in (0..from_row.min(table.row_count())).rev() {
-                if check(row, 1024) {
-                    return Outcome::Cancelled;
-                }
-                if row_matches(row) {
-                    return Outcome::Found(row);
-                }
-            }
-        }
-    }
-    Outcome::NotFound
 }
 
 /// 行 `row` で、最初に（後ろ向きなら最後に）一致するセルの列。
@@ -179,7 +141,8 @@ pub fn count_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lazy_table::{LazySearcher, LazyTable};
+    use crate::table::eager::CsvTable;
+    use crate::table::lazy::{LazySearcher, LazyTable};
     use encoding_rs::Encoding;
     use std::sync::Arc;
 

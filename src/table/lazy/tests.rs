@@ -1,6 +1,6 @@
 use super::index_job::{CHUNK, FIRST_CHUNK};
 use super::*;
-use crate::csv_data::CsvTable;
+use crate::table::eager::CsvTable;
 
 fn open_indexed(bytes: &[u8], chunk: usize) -> LazyTable {
     let (table, mut job) = LazyTable::open(Arc::new(bytes.to_vec()), None);
@@ -49,9 +49,9 @@ fn utf16(text: &str, le: bool) -> Vec<u8> {
 #[test]
 fn matches_eager_on_the_sample_files() {
     for (name, bytes) in [
-        ("utf8", &include_bytes!("../../samples/utf8.csv")[..]),
-        ("sjis", &include_bytes!("../../samples/sjis.csv")[..]),
-        ("wide", &include_bytes!("../../samples/wide.csv")[..]),
+        ("utf8", &include_bytes!("../../../samples/utf8.csv")[..]),
+        ("sjis", &include_bytes!("../../../samples/sjis.csv")[..]),
+        ("wide", &include_bytes!("../../../samples/wide.csv")[..]),
     ] {
         for chunk in [8, 64, CHUNK] {
             assert_same_as_eager(bytes, chunk, &format!("{name} chunk={chunk}"));

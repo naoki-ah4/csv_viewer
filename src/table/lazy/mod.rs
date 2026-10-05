@@ -16,20 +16,21 @@ use std::sync::{Arc, Mutex};
 
 use encoding_rs::Encoding;
 
-use crate::csv_data::{classify_from, find_first_non_ascii};
 use crate::matcher::{Direction, Matcher, Outcome};
-use crate::record_index::{
+use crate::table::encoding::{classify_from, find_first_non_ascii};
+use index::{
     Byte, Record, RecordIndex, STRIDE, Scanner, Unit, Utf16Be, Utf16Le, aligned_end,
     locate_in_block, record_containing,
 };
 
+pub(crate) mod index;
 mod index_job;
-mod searcher;
+mod search;
 #[cfg(test)]
 mod tests;
 
 pub use index_job::IndexJob;
-pub use searcher::LazySearcher;
+pub use search::LazySearcher;
 
 /// 元のバイト列。mmap でも `Vec<u8>` でもよい。
 pub type Bytes = Arc<dyn AsRef<[u8]> + Send + Sync>;
