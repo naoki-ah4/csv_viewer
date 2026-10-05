@@ -1,10 +1,13 @@
 mod csv_data;
 mod lazy_table;
 mod record_index;
+mod scroll_pos;
 mod scrollbar;
 mod table;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -12,11 +15,12 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, Menu, MenuItem,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
-    Task, UniformListScrollHandle, Window, WindowBounds, WindowOptions, actions, div, point,
-    prelude::*, px, rgb, rgba, size, uniform_list,
+    ScrollWheelEvent, Task, Window, WindowBounds, WindowOptions, actions, canvas, div, point,
+    prelude::*, px, rgb, rgba, size,
 };
 
 use lazy_table::{IndexJob, IndexStatus};
+use scroll_pos::ScrollPos;
 use scrollbar::{Axis, AxisState};
 use table::Table;
 
@@ -28,6 +32,8 @@ const MAX_COL_WIDTH: f32 = 400.0;
 const CHAR_WIDTH: f32 = 7.5;
 const CELL_PADDING: f32 = 16.0;
 const WIDTH_SAMPLE_ROWS: usize = 1000;
+/// 行を描く領域の大きさがまだ分からない最初の1フレームだけ使う高さ。
+const DEFAULT_VIEWPORT_HEIGHT: f32 = 800.0;
 /// 遅延読み込みの索引作成中に、画面を更新する間隔。
 /// 最初の `FAST_POLL_PERIOD` の間は1フレーム（約16ms）ごとに更新して、最初の行をすぐ見せる。
 const FAST_POLL_INTERVAL: Duration = Duration::from_millis(16);
@@ -92,7 +98,12 @@ struct Viewer {
     cancel: Arc<AtomicBool>,
     /// 索引作成中に、画面を定期的に更新するタスク。
     poll_task: Option<Task<()>>,
-    list_scroll: UniformListScrollHandle,
+    /// 縦のスクロール位置（先頭に見える行の番号と、その行の中でのずれ）。
+    /// 全体の座標（先頭から何px）で持つと、行数が多いほど刻み幅が粗くなり、`f32` では
+    /// 約70万行を超えたあたりから行が重なって描かれる。
+    scroll: ScrollPos,
+    /// 行を描く領域の位置と大きさ。描画のたびに更新される。
+    viewport: Rc<Cell<Bounds<Pixels>>>,
     h_scroll: ScrollHandle,
     drag: Option<Drag>,
     focus_handle: FocusHandle,
@@ -108,7 +119,8 @@ impl Viewer {
             index_task: None,
             cancel: Arc::new(AtomicBool::new(false)),
             poll_task: None,
-            list_scroll: UniformListScrollHandle::new(),
+            scroll: ScrollPos::TOP,
+            viewport: Rc::new(Cell::new(Bounds::default())),
             h_scroll: ScrollHandle::new(),
             drag: None,
             focus_handle: cx.focus_handle(),
@@ -167,11 +179,7 @@ impl Viewer {
             Ok((loaded, job)) => {
                 self.stop_indexing();
                 self.loaded = Some(loaded);
-                self.list_scroll
-                    .0
-                    .borrow()
-                    .base_handle
-                    .set_offset(point(px(0.), px(0.)));
+                self.scroll = ScrollPos::TOP;
                 self.h_scroll.set_offset(point(px(0.), px(0.)));
                 window.set_window_title(&file_name(path));
                 if let Some(job) = job {
@@ -287,9 +295,27 @@ impl Viewer {
         .detach();
     }
 
+    fn row_count(&self) -> usize {
+        self.loaded.as_ref().map_or(0, |l| l.table.row_count())
+    }
+
+    /// 縦に動かせる上限（最後の行が領域の下端に揃う位置）。
+    fn max_scroll(&self) -> ScrollPos {
+        ScrollPos::max(self.row_count(), self.viewport.get().size.height.into())
+    }
+
     fn axis_state(&self, axis: Axis) -> AxisState {
         match axis {
-            Axis::Vertical => AxisState::vertical(&self.list_scroll),
+            Axis::Vertical => {
+                let viewport = self.viewport.get();
+                AxisState {
+                    origin: viewport.origin.y,
+                    viewport: viewport.size.height,
+                    // つまみの長さの比率を求めるためだけに使うので、`f32` に丸めても問題ない。
+                    content: px((self.row_count() as f64 * f64::from(ROW_HEIGHT)) as f32),
+                    fraction: self.scroll.fraction(self.max_scroll()),
+                }
+            }
             Axis::Horizontal => AxisState::horizontal(&self.h_scroll),
         }
     }
@@ -311,13 +337,14 @@ impl Viewer {
         let state = self.axis_state(axis);
         let Some(thumb) = state.thumb() else { return };
         let pos = axis_value(axis, mouse) - state.origin - grab;
-        let offset = state.offset_for_thumb_pos(thumb.len, pos);
+        let fraction = state.fraction_for_thumb_pos(thumb.len, pos);
         match axis {
             Axis::Vertical => {
-                let handle = self.list_scroll.0.borrow().base_handle.clone();
-                handle.set_offset(point(handle.offset().x, offset));
+                self.scroll = ScrollPos::from_fraction(fraction, self.max_scroll());
             }
             Axis::Horizontal => {
+                let travel = f64::from(f32::from(state.content - state.viewport));
+                let offset = px(-(travel * fraction) as f32);
                 self.h_scroll
                     .set_offset(point(offset, self.h_scroll.offset().y));
             }
@@ -398,29 +425,54 @@ impl Viewer {
         let total_width: f32 = loaded.col_widths.iter().sum();
         let row_count = loaded.table.row_count();
 
-        let list = uniform_list(
-            "rows",
-            row_count,
-            cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
-                let Some(loaded) = &this.loaded else {
-                    return Vec::new();
-                };
-                range
-                    .map(|ix| {
-                        div()
-                            .flex()
-                            .flex_row()
-                            .h(px(ROW_HEIGHT))
-                            .when(ix % 2 == 1, |d| d.bg(rgb(0xfafafa)))
-                            .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
-                                cell(loaded.table.cell(ix, i).to_string(), *w)
-                            }))
-                    })
-                    .collect()
-            }),
-        )
-        .track_scroll(self.list_scroll.clone())
-        .flex_1();
+        // 縦は自前で仮想スクロールする。全体の座標（数億px）は使わず、見えている先頭行の番号と、
+        // その行の中でのずれ（0〜行の高さ）だけで位置を持つ。各行の位置が小さな値になるので、
+        // 何千万行あっても誤差が出ない。
+        self.scroll = self.scroll.clamped(self.max_scroll());
+        let viewport_height = match f32::from(self.viewport.get().size.height) {
+            h if h > 0.0 => h,
+            _ => DEFAULT_VIEWPORT_HEIGHT,
+        };
+        let visible = visible_rows(self.scroll, viewport_height, row_count);
+        let rows = (visible.first..visible.last).map(|ix| {
+            div()
+                .flex()
+                .flex_row()
+                .flex_shrink_0()
+                .h(px(ROW_HEIGHT))
+                .when(ix % 2 == 1, |d| d.bg(rgb(0xfafafa)))
+                .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
+                    cell(loaded.table.cell(ix, i).to_string(), *w)
+                }))
+        });
+        let viewport = self.viewport.clone();
+        let list = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                let dy = f64::from(f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y));
+                if dy != 0.0 {
+                    // 下へ送る向き（delta.y が負）で、位置が増える。
+                    this.scroll = this.scroll.scrolled_by(-dy).clamped(this.max_scroll());
+                    cx.notify();
+                }
+            }))
+            // 行を描く領域の大きさを、次の描画のために控えておく。
+            .child(
+                canvas(move |bounds, _, _| viewport.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .relative()
+                    .top(px(-visible.offset))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            );
 
         // ヘッダーと本体を同じ横幅の列にまとめ、外側で横スクロールさせる。
         let table = div()
@@ -433,8 +485,7 @@ impl Viewer {
             .child(list);
 
         // 初回の描画ではスクロール領域の寸法がまだ0なので、確定後にもう一度描画してバーを出す。
-        if self.list_scroll.0.borrow().base_handle.bounds().size.height <= px(0.)
-            || self.h_scroll.bounds().size.width <= px(0.)
+        if self.viewport.get().size.height <= px(0.) || self.h_scroll.bounds().size.width <= px(0.)
         {
             window.request_animation_frame();
         }
@@ -442,18 +493,21 @@ impl Viewer {
         let vbar = self.thumb_element(Axis::Vertical, cx);
         let hbar = self.thumb_element(Axis::Horizontal, cx);
 
+        // 縦は自前で処理するので、横スクロールの要素が、縦のホイールを横スクロールとして
+        // 解釈しないよう、軸を制限する。
+        let mut h_scroll_area = div()
+            .id("table-scroll")
+            .size_full()
+            .overflow_x_scroll()
+            .track_scroll(&self.h_scroll)
+            .child(table);
+        h_scroll_area.style().restrict_scroll_to_axis = Some(true);
+
         div()
             .relative()
             .flex_1()
             .min_h_0()
-            .child(
-                div()
-                    .id("table-scroll")
-                    .size_full()
-                    .overflow_x_scroll()
-                    .track_scroll(&self.h_scroll)
-                    .child(table),
-            )
+            .child(h_scroll_area)
             .children(vbar)
             .children(hbar)
     }
@@ -487,6 +541,29 @@ impl Viewer {
             .text_sm()
             .when(self.error.is_some(), |d| d.text_color(rgb(0xb00020)))
             .child(text)
+    }
+}
+
+/// 画面に描く行の範囲と、先頭行が画面の上端より上にはみ出している量（px）。
+#[derive(Debug, PartialEq)]
+struct VisibleRows {
+    first: usize,
+    last: usize,
+    offset: f32,
+}
+
+/// スクロール位置から、描く行を求める。範囲外の位置は範囲内に丸める。
+/// `offset` は、先頭行の中でのずれそのもの（0以上、行の高さ未満）。
+fn visible_rows(scroll: ScrollPos, viewport_height: f32, row_count: usize) -> VisibleRows {
+    let scroll = scroll.clamped(ScrollPos::max(row_count, viewport_height));
+    let first = scroll.row.min(row_count);
+    let offset = if scroll.row >= row_count { 0.0 } else { scroll.offset };
+    // 先頭の行がはみ出しているぶん、領域の高さを覆うには1行多く要る。
+    let count = (viewport_height / ROW_HEIGHT).ceil() as usize + 1;
+    VisibleRows {
+        first,
+        last: first.saturating_add(count).min(row_count),
+        offset,
     }
 }
 
@@ -706,5 +783,94 @@ mod tests {
         let table = Table::Eager(csv_data::CsvTable::from_bytes(b"a,b\n1,2\n").unwrap());
         let mut loaded = Loaded::new(table);
         assert!(!loaded.refresh_widths());
+    }
+
+    // ---- 縦スクロールの描画範囲 ----
+
+    fn pos(row: usize, offset: f32) -> ScrollPos {
+        ScrollPos { row, offset }
+    }
+
+    #[test]
+    fn visible_rows_at_the_top() {
+        assert_eq!(
+            visible_rows(ScrollPos::TOP, 100.0, 1000),
+            VisibleRows { first: 0, last: 6, offset: 0.0 }
+        );
+    }
+
+    #[test]
+    fn visible_rows_with_an_offset_into_the_first_row() {
+        assert_eq!(
+            visible_rows(pos(2, 2.0), 100.0, 1000),
+            VisibleRows { first: 2, last: 8, offset: 2.0 }
+        );
+    }
+
+    #[test]
+    fn visible_rows_stop_at_the_last_row() {
+        let max = ScrollPos::max(10, 100.0);
+        let v = visible_rows(max, 100.0, 10);
+        assert_eq!(v.last, 10);
+        assert!(v.first < 10);
+        assert_eq!(
+            visible_rows(ScrollPos::TOP, 100.0, 0),
+            VisibleRows { first: 0, last: 0, offset: 0.0 }
+        );
+    }
+
+    #[test]
+    fn visible_rows_clamp_an_out_of_range_position() {
+        let v = visible_rows(pos(5_000, 10.0), 100.0, 100);
+        assert_eq!(v, visible_rows(ScrollPos::max(100, 100.0), 100.0, 100));
+    }
+
+    /// 全体の座標を `f32` で持つと、約3000万行で隣り合う行の位置が衝突する（今回の不具合）。
+    #[test]
+    fn global_f32_positions_collide_for_tens_of_millions_of_rows() {
+        let rows = 30_466_333usize;
+        let top_of = |ix: usize| (ix as f32) * ROW_HEIGHT;
+        let collisions = (rows - 100..rows)
+            .filter(|&ix| top_of(ix) == top_of(ix + 1))
+            .count();
+        assert!(collisions > 0, "f32 positions should collide near the end");
+    }
+
+    /// 先頭行からの相対位置で描けば、同じ行数でも衝突せず、行の高さちょうどに並ぶ。
+    #[test]
+    fn relative_positions_stay_exact_for_tens_of_millions_of_rows() {
+        for rows in [1_000_000usize, 30_466_333, 500_000_000, 5_000_000_000_000] {
+            for viewport in [300.0f32, 700.0, 2160.0] {
+                let max = ScrollPos::max(rows, viewport);
+                for scroll in [
+                    ScrollPos::TOP,
+                    pos(rows / 3, 7.5),
+                    ScrollPos::from_fraction(0.5, max),
+                    pos(max.row.saturating_sub(1), 20.0),
+                    max,
+                ] {
+                    let v = visible_rows(scroll, viewport, rows);
+                    assert!(v.last <= rows);
+                    assert!((0.0..ROW_HEIGHT).contains(&v.offset), "offset {}", v.offset);
+                    // 画面上の各行の上端は、行の高さちょうどの間隔で並ぶ。
+                    let tops: Vec<f32> = (v.first..v.last)
+                        .map(|ix| (ix - v.first) as f32 * ROW_HEIGHT - v.offset)
+                        .collect();
+                    for pair in tops.windows(2) {
+                        assert_eq!(pair[1] - pair[0], ROW_HEIGHT);
+                    }
+                    // 末尾以外では、画面を覆う。
+                    if v.last < rows {
+                        let bottom = tops.last().unwrap() + ROW_HEIGHT;
+                        assert!(bottom >= viewport, "rows must cover the viewport");
+                    }
+                }
+                // 末尾では、最後の行の下端が、領域の下端にちょうど揃う。
+                let v = visible_rows(max, viewport, rows);
+                assert_eq!(v.last, rows);
+                let bottom = (v.last - v.first) as f32 * ROW_HEIGHT - v.offset;
+                assert!((bottom - viewport).abs() < 1e-2, "{bottom} vs {viewport}");
+            }
+        }
     }
 }

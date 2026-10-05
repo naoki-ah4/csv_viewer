@@ -1,4 +1,4 @@
-use gpui::{Pixels, ScrollHandle, UniformListScrollHandle, px};
+use gpui::{Pixels, ScrollHandle, px};
 
 pub const THICKNESS: f32 = 10.0;
 pub const MARGIN: f32 = 2.0;
@@ -11,12 +11,16 @@ pub enum Axis {
 }
 
 /// ある軸方向の表示領域・全体サイズ・スクロール量。座標はウィンドウ基準。
+///
+/// スクロール量は、全体の長さに対する割合（0〜1）で持つ。縦は行数が数千万を超え得るため、
+/// ピクセル数にすると精度が足りなくなる。`content` は、つまみの長さを求める比率にだけ使う。
 #[derive(Clone, Copy)]
 pub struct AxisState {
     pub origin: Pixels,
     pub viewport: Pixels,
     pub content: Pixels,
-    pub offset: Pixels,
+    /// どこまでスクロールしたかの割合。0 が先頭、1 が末尾。
+    pub fraction: f64,
 }
 
 /// つまみの位置と長さ（表示領域の先頭からの相対値）。
@@ -27,27 +31,19 @@ pub struct Thumb {
 }
 
 impl AxisState {
-    pub fn vertical(list: &UniformListScrollHandle) -> Self {
-        let state = list.0.borrow();
-        let bounds = state.base_handle.bounds();
-        Self {
-            origin: bounds.origin.y,
-            viewport: bounds.size.height,
-            content: state
-                .last_item_size
-                .map(|s| s.contents.height)
-                .unwrap_or_default(),
-            offset: state.base_handle.offset().y,
-        }
-    }
-
     pub fn horizontal(handle: &ScrollHandle) -> Self {
         let bounds = handle.bounds();
+        let max_offset = f64::from(f32::from(handle.max_offset().width));
+        let fraction = if max_offset > 0.0 {
+            (-f64::from(f32::from(handle.offset().x)) / max_offset).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         Self {
             origin: bounds.origin.x,
             viewport: bounds.size.width,
             content: bounds.size.width + handle.max_offset().width,
-            offset: handle.offset().x,
+            fraction,
         }
     }
 
@@ -57,20 +53,18 @@ impl AxisState {
             return None;
         }
         let len = (self.viewport * (self.viewport / self.content)).max(px(MIN_THUMB_LEN));
-        let fraction = (-self.offset / (self.content - self.viewport)).clamp(0., 1.);
         Some(Thumb {
-            pos: (self.viewport - len) * fraction,
+            pos: (self.viewport - len) * self.fraction.clamp(0.0, 1.0) as f32,
             len,
         })
     }
 
-    /// つまみの先頭が表示領域の先頭から `pos` の位置にあるときのスクロール量。
-    pub fn offset_for_thumb_pos(&self, thumb_len: Pixels, pos: Pixels) -> Pixels {
-        let travel = self.viewport - thumb_len;
-        if travel <= px(0.) {
-            return px(0.);
+    /// つまみの先頭が表示領域の先頭から `pos` の位置にあるときの、スクロール量の割合（0〜1）。
+    pub fn fraction_for_thumb_pos(&self, thumb_len: Pixels, pos: Pixels) -> f64 {
+        let travel = f64::from(f32::from(self.viewport - thumb_len));
+        if travel <= 0.0 {
+            return 0.0;
         }
-        let fraction = (pos / travel).clamp(0., 1.);
-        -(self.content - self.viewport) * fraction
+        (f64::from(f32::from(pos)) / travel).clamp(0.0, 1.0)
     }
 }
