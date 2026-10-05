@@ -1,5 +1,6 @@
 mod csv_data;
 mod scrollbar;
+mod table;
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +11,8 @@ use gpui::{
     prelude::*, px, rgb, rgba, size, uniform_list,
 };
 
-use csv_data::CsvTable;
 use scrollbar::{Axis, AxisState};
+use table::Table;
 
 actions!(csv_viewer, [Quit, CloseWindow, OpenFile]);
 
@@ -30,7 +31,7 @@ struct Drag {
 }
 
 struct Loaded {
-    table: CsvTable,
+    table: Table,
     col_widths: Vec<f32>,
 }
 
@@ -71,7 +72,7 @@ impl Viewer {
         let load = cx.background_spawn({
             let path = path.clone();
             async move {
-                let table = CsvTable::load(&path)?;
+                let table = Table::load(&path)?;
                 let col_widths = column_widths(&table);
                 anyhow::Ok(Loaded { table, col_widths })
             }
@@ -313,7 +314,7 @@ impl Viewer {
                 "{} 行 / {} 列 / {}",
                 l.table.row_count(),
                 l.col_widths.len(),
-                l.table.encoding.name()
+                l.table.encoding().name()
             ),
             (None, None, None) => String::new(),
         };
@@ -343,13 +344,13 @@ fn axis_value(axis: Axis, p: Point<Pixels>) -> Pixels {
 }
 
 /// 全角は半角の2倍幅として概算する。先頭の一部の行だけを見て列幅を決める。
-fn column_widths(table: &CsvTable) -> Vec<f32> {
+fn column_widths(table: &Table) -> Vec<f32> {
     let mut widths = vec![0usize; table.column_count()];
     for (col, w) in widths.iter_mut().enumerate() {
         let sampled = (0..table.row_count().min(WIDTH_SAMPLE_ROWS)).map(|row| table.cell(row, col));
         *w = std::iter::once(table.header(col))
             .chain(sampled)
-            .map(display_width)
+            .map(|text| display_width(&text))
             .max()
             .unwrap_or(0);
     }
