@@ -204,11 +204,11 @@ impl Viewer {
             .font_weight(gpui::FontWeight::BOLD)
             .children(
                 loaded.col_widths.iter().enumerate().map(|(i, w)| {
-                    cell(loaded.table.headers.get(i).cloned().unwrap_or_default(), *w)
+                    cell(loaded.table.header(i).to_string(), *w)
                 }),
             );
         let total_width: f32 = loaded.col_widths.iter().sum();
-        let row_count = loaded.table.rows.len();
+        let row_count = loaded.table.row_count();
 
         let list = uniform_list(
             "rows",
@@ -219,14 +219,13 @@ impl Viewer {
                 };
                 range
                     .map(|ix| {
-                        let row = &loaded.table.rows[ix];
                         div()
                             .flex()
                             .flex_row()
                             .h(px(ROW_HEIGHT))
                             .when(ix % 2 == 1, |d| d.bg(rgb(0xfafafa)))
                             .children(loaded.col_widths.iter().enumerate().map(|(i, w)| {
-                                cell(row.get(i).cloned().unwrap_or_default(), *w)
+                                cell(loaded.table.cell(ix, i).to_string(), *w)
                             }))
                     })
                     .collect()
@@ -276,7 +275,7 @@ impl Viewer {
             (Some(error), _) => error.clone(),
             (None, Some(l)) => format!(
                 "{} 行 / {} 列 / {}",
-                l.table.rows.len(),
+                l.table.row_count(),
                 l.col_widths.len(),
                 l.table.encoding.name()
             ),
@@ -304,11 +303,13 @@ fn axis_value(axis: Axis, p: Point<Pixels>) -> Pixels {
 /// 全角は半角の2倍幅として概算する。先頭の一部の行だけを見て列幅を決める。
 fn column_widths(table: &CsvTable) -> Vec<f32> {
     let mut widths = vec![0usize; table.column_count()];
-    let sampled = table.rows.iter().take(WIDTH_SAMPLE_ROWS);
-    for row in std::iter::once(&table.headers).chain(sampled) {
-        for (w, cell) in widths.iter_mut().zip(row) {
-            *w = (*w).max(display_width(cell));
-        }
+    for (col, w) in widths.iter_mut().enumerate() {
+        let sampled = (0..table.row_count().min(WIDTH_SAMPLE_ROWS)).map(|row| table.cell(row, col));
+        *w = std::iter::once(table.header(col))
+            .chain(sampled)
+            .map(display_width)
+            .max()
+            .unwrap_or(0);
     }
     widths
         .into_iter()

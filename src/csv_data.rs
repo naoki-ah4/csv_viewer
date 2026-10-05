@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::Context;
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::Encoding;
 
@@ -10,10 +11,23 @@ const DETECT_WINDOW: usize = 64 * 1024;
 const DETECT_SCAN_LIMIT: usize = 1024 * 1024;
 const ESC: u8 = 0x1B;
 
+/// デコード済みのCSVを、セル文字列を1本に連結した形で保持する。
+///
+/// セルごとに `String` を持つと、ファイルの7〜8倍のメモリと大量の小さな確保が必要になる。
+/// ここでは次の3つだけを持ち、ファイルの1.3倍程度に収める。
+/// - `text`: 全セルの文字列を連結したもの（引用符は外し、`""` はほどいた後の中身）
+/// - `cell_ends`: 各セルの終端位置（`text` 内のバイト位置。始端は1つ前のセルの終端）
+/// - `row_starts`: 各行の先頭セルが `cell_ends` の何番目か（末尾に番兵を1つ持つ）
+///
+/// 最初のレコードをヘッダーとして扱う。内部の配置は外に出さず、読み取りは
+/// `cell` などの窓口だけを使う（編集を重ねる層を後から挟めるようにするため）。
 pub struct CsvTable {
     pub encoding: &'static Encoding,
-    pub headers: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    text: String,
+    cell_ends: Vec<u32>,
+    /// 長さは「レコード数 + 1」。ヘッダーも1レコードとして含む。
+    row_starts: Vec<u32>,
+    column_count: usize,
 }
 
 impl CsvTable {
@@ -23,33 +37,84 @@ impl CsvTable {
 
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
         let (encoding, body) = detect_encoding(bytes);
-        let (text, _, _) = encoding.decode(body);
+        // UTF-8 として正しければ借用のまま（コピーしない）。
+        let (decoded, _) = encoding.decode_without_bom_handling(body);
 
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(false)
             .flexible(true)
-            .from_reader(text.as_bytes());
+            .from_reader(decoded.as_bytes());
 
-        let mut records = reader
-            .records()
-            .map(|r| r.map(|r| r.iter().map(str::to_owned).collect::<Vec<_>>()));
-        let headers = records.next().transpose()?.unwrap_or_default();
-        let rows = records.collect::<Result<Vec<_>, _>>()?;
+        // 連結後の文字列は、区切りや引用符を除くので入力より小さくなる。
+        let mut text = String::with_capacity(decoded.len());
+        let mut cell_ends: Vec<u32> = Vec::new();
+        let mut row_starts: Vec<u32> = Vec::new();
+        let mut column_count = 0;
+
+        let mut record = csv::StringRecord::new();
+        while reader.read_record(&mut record)? {
+            row_starts.push(u32::try_from(cell_ends.len()).context("too many cells")?);
+            column_count = column_count.max(record.len());
+            for field in &record {
+                text.push_str(field);
+                cell_ends.push(u32::try_from(text.len()).context("file is too large")?);
+            }
+        }
+        row_starts.push(u32::try_from(cell_ends.len()).context("too many cells")?);
+
+        text.shrink_to_fit();
+        cell_ends.shrink_to_fit();
+        row_starts.shrink_to_fit();
 
         Ok(Self {
             encoding,
-            headers,
-            rows,
+            text,
+            cell_ends,
+            row_starts,
+            column_count,
         })
     }
 
+    /// このテーブルがヒープに確保しているバイト数（容量ベース）。
+    /// アプリ本体では使わず、計測用の `examples/bench_load.rs` から呼ぶ。
+    #[allow(dead_code)]
+    pub fn heap_bytes(&self) -> usize {
+        self.text.capacity()
+            + self.cell_ends.capacity() * size_of::<u32>()
+            + self.row_starts.capacity() * size_of::<u32>()
+    }
+
+    /// ヘッダーを除いたデータ行の数。
+    pub fn row_count(&self) -> usize {
+        (self.row_starts.len() - 1).saturating_sub(1)
+    }
+
+    /// ヘッダーを含めた中で最も広い行の列数。
     pub fn column_count(&self) -> usize {
-        self.rows
-            .iter()
-            .map(Vec::len)
-            .chain([self.headers.len()])
-            .max()
-            .unwrap_or(0)
+        self.column_count
+    }
+
+    pub fn header(&self, col: usize) -> &str {
+        self.record_cell(0, col)
+    }
+
+    /// データ行 `row`（0始まり、ヘッダーを除く）の `col` 列目。範囲外は空文字列。
+    pub fn cell(&self, row: usize, col: usize) -> &str {
+        self.record_cell(row + 1, col)
+    }
+
+    fn record_cell(&self, record: usize, col: usize) -> &str {
+        let (Some(&first), Some(&next_first)) =
+            (self.row_starts.get(record), self.row_starts.get(record + 1))
+        else {
+            return "";
+        };
+        let ix = first as usize + col;
+        if ix >= next_first as usize {
+            return "";
+        }
+        let start = if ix == 0 { 0 } else { self.cell_ends[ix - 1] };
+        &self.text[start as usize..self.cell_ends[ix] as usize]
     }
 }
 
@@ -79,6 +144,25 @@ mod tests {
         CsvTable::from_bytes(bytes).unwrap()
     }
 
+    fn headers(t: &CsvTable) -> Vec<String> {
+        (0..t.column_count()).map(|c| t.header(c).to_string()).collect()
+    }
+
+    /// 各行の実際のセル数は取れないため、列数ぶん読んで末尾の空セルを落とす。
+    /// （テストの入力に末尾が空のセルを含めないこと）
+    fn rows(t: &CsvTable) -> Vec<Vec<String>> {
+        (0..t.row_count())
+            .map(|r| {
+                let mut row: Vec<String> =
+                    (0..t.column_count()).map(|c| t.cell(r, c).to_string()).collect();
+                while row.last().is_some_and(String::is_empty) {
+                    row.pop();
+                }
+                row
+            })
+            .collect()
+    }
+
     fn encode(encoding: &'static Encoding, text: &str) -> Vec<u8> {
         let (bytes, _, had_errors) = encoding.encode(text);
         assert!(!had_errors, "test fixture is not representable in {}", encoding.name());
@@ -88,45 +172,45 @@ mod tests {
     #[test]
     fn parses_header_and_rows() {
         let t = parse(b"a,b\n1,2\n3,4\n");
-        assert_eq!(t.headers, ["a", "b"]);
-        assert_eq!(t.rows, [["1", "2"], ["3", "4"]]);
+        assert_eq!(headers(&t), ["a", "b"]);
+        assert_eq!(rows(&t), [["1", "2"], ["3", "4"]]);
         assert_eq!(t.encoding, encoding_rs::UTF_8);
     }
 
     #[test]
     fn handles_crlf_and_missing_trailing_newline() {
         let t = parse(b"a,b\r\n1,2\r\n3,4");
-        assert_eq!(t.rows, [["1", "2"], ["3", "4"]]);
+        assert_eq!(rows(&t), [["1", "2"], ["3", "4"]]);
     }
 
     #[test]
     fn keeps_quoted_comma_newline_and_quote() {
         let t = parse(b"a,b\n\"x,y\",\"line1\nline2\"\n\"say \"\"hi\"\"\",z\n");
-        assert_eq!(t.rows[0], ["x,y", "line1\nline2"]);
-        assert_eq!(t.rows[1], ["say \"hi\"", "z"]);
+        assert_eq!(rows(&t)[0], ["x,y", "line1\nline2"]);
+        assert_eq!(rows(&t)[1], ["say \"hi\"", "z"]);
     }
 
     #[test]
     fn accepts_ragged_rows_and_counts_widest_column() {
         let t = parse(b"a,b\n1\n1,2,3,4\n");
-        assert_eq!(t.rows[0], ["1"]);
-        assert_eq!(t.rows[1].len(), 4);
+        assert_eq!(rows(&t)[0], ["1"]);
+        assert_eq!(rows(&t)[1].len(), 4);
         assert_eq!(t.column_count(), 4);
     }
 
     #[test]
     fn empty_input_has_no_headers_or_rows() {
         let t = parse(b"");
-        assert!(t.headers.is_empty());
-        assert!(t.rows.is_empty());
+        assert!(headers(&t).is_empty());
+        assert!(rows(&t).is_empty());
         assert_eq!(t.column_count(), 0);
     }
 
     #[test]
     fn header_only_input_has_no_rows() {
         let t = parse(b"a,b,c\n");
-        assert_eq!(t.headers, ["a", "b", "c"]);
-        assert!(t.rows.is_empty());
+        assert_eq!(headers(&t), ["a", "b", "c"]);
+        assert!(rows(&t).is_empty());
         assert_eq!(t.column_count(), 3);
     }
 
@@ -136,7 +220,7 @@ mod tests {
         bytes.extend_from_slice("名前,部署\n山田,営業\n".as_bytes());
         let t = parse(&bytes);
         assert_eq!(t.encoding, encoding_rs::UTF_8);
-        assert_eq!(t.headers, ["名前", "部署"]);
+        assert_eq!(headers(&t), ["名前", "部署"]);
     }
 
     #[test]
@@ -147,7 +231,7 @@ mod tests {
         }
         let t = parse(&bytes);
         assert_eq!(t.encoding, encoding_rs::UTF_16LE);
-        assert_eq!(t.rows, [["山田", "営業"]]);
+        assert_eq!(rows(&t), [["山田", "営業"]]);
     }
 
     #[test]
@@ -158,8 +242,8 @@ mod tests {
                     3,佐藤健,人事部,採用活動を担当しています\n";
         let t = parse(&encode(encoding_rs::SHIFT_JIS, text));
         assert_eq!(t.encoding, encoding_rs::SHIFT_JIS);
-        assert_eq!(t.headers, ["id", "名前", "部署", "備考"]);
-        assert_eq!(t.rows[0][1], "山田太郎");
+        assert_eq!(headers(&t), ["id", "名前", "部署", "備考"]);
+        assert_eq!(rows(&t)[0][1], "山田太郎");
     }
 
     #[test]
@@ -169,20 +253,20 @@ mod tests {
                     鈴木花子,開発部,新規プロジェクトの担当です\n";
         let t = parse(&encode(encoding_rs::EUC_JP, text));
         assert_eq!(t.encoding, encoding_rs::EUC_JP);
-        assert_eq!(t.rows[1][0], "鈴木花子");
+        assert_eq!(rows(&t)[1][0], "鈴木花子");
     }
 
     #[test]
     fn ascii_only_input_is_not_misread() {
         let t = parse(b"id,name\n1,alice\n2,bob\n");
-        assert_eq!(t.rows[1], ["2", "bob"]);
+        assert_eq!(rows(&t)[1], ["2", "bob"]);
     }
 
     #[test]
     fn detects_short_shift_jis() {
         let t = parse(&encode(encoding_rs::SHIFT_JIS, "名前,部署\n山田,営業\n"));
         assert_eq!(t.encoding, encoding_rs::SHIFT_JIS);
-        assert_eq!(t.rows, [["山田", "営業"]]);
+        assert_eq!(rows(&t), [["山田", "営業"]]);
     }
 
     #[test]
@@ -198,7 +282,7 @@ mod tests {
         text.push_str("10000,鈴木花子,新規プロジェクトの担当です\n");
         let t = parse(&encode(encoding_rs::SHIFT_JIS, &text));
         assert_eq!(t.encoding, encoding_rs::SHIFT_JIS);
-        assert_eq!(t.rows.last().unwrap()[1], "鈴木花子");
+        assert_eq!(rows(&t).last().unwrap()[1], "鈴木花子");
     }
 
     #[test]
@@ -211,8 +295,8 @@ mod tests {
         }
         let t = parse(text.as_bytes());
         assert_eq!(t.encoding, encoding_rs::UTF_8);
-        assert_eq!(t.rows.len(), n);
-        assert_eq!(t.rows[n - 1][1], format!("テスト太郎{}", n - 1));
+        assert_eq!(rows(&t).len(), n);
+        assert_eq!(rows(&t)[n - 1][1], format!("テスト太郎{}", n - 1));
     }
 
     #[test]
@@ -225,7 +309,7 @@ mod tests {
         bytes.push(b'\n');
         let t = parse(&bytes);
         assert_eq!(t.encoding, encoding_rs::ISO_2022_JP);
-        assert_eq!(t.rows[0][1], "日本語");
+        assert_eq!(rows(&t)[0][1], "日本語");
     }
 
     #[test]
@@ -257,5 +341,58 @@ mod tests {
         }
         let t = parse(&encode(encoding_rs::SHIFT_JIS, &text));
         assert_eq!(t.encoding, encoding_rs::SHIFT_JIS);
+    }
+
+    #[test]
+    fn cell_access_is_exact_for_ragged_and_empty_cells() {
+        let t = parse(b"h1,h2,h3\na,,c\n,,\nx\n,y\n");
+        assert_eq!(t.row_count(), 4);
+        assert_eq!(t.column_count(), 3);
+        assert_eq!((t.cell(0, 0), t.cell(0, 1), t.cell(0, 2)), ("a", "", "c"));
+        assert_eq!((t.cell(1, 0), t.cell(1, 1), t.cell(1, 2)), ("", "", ""));
+        assert_eq!((t.cell(2, 0), t.cell(2, 1), t.cell(2, 2)), ("x", "", ""));
+        assert_eq!((t.cell(3, 0), t.cell(3, 1), t.cell(3, 2)), ("", "y", ""));
+    }
+
+    #[test]
+    fn out_of_range_access_returns_empty() {
+        let t = parse(b"a,b\n1,2\n");
+        assert_eq!(t.cell(0, 2), "");
+        assert_eq!(t.cell(1, 0), "");
+        assert_eq!(t.cell(99, 99), "");
+        assert_eq!(t.header(5), "");
+        assert_eq!(parse(b"").header(0), "");
+        assert_eq!(parse(b"").cell(0, 0), "");
+    }
+
+    #[test]
+    fn row_count_excludes_header() {
+        assert_eq!(parse(b"").row_count(), 0);
+        assert_eq!(parse(b"a,b\n").row_count(), 0);
+        assert_eq!(parse(b"a,b\n1,2\n").row_count(), 1);
+    }
+
+    #[test]
+    fn many_rows_keep_every_cell_at_the_right_place() {
+        let mut csv = String::from("id,text,empty,last\n");
+        let n = 20_000;
+        for i in 0..n {
+            // 長さの違うセルと空セルを混ぜて、オフセットのずれを検出しやすくする。
+            csv.push_str(&format!("{i},{},,end{i}\n", "x".repeat(i % 7)));
+        }
+        let t = parse(csv.as_bytes());
+        assert_eq!(t.row_count(), n);
+        for i in (0..n).step_by(97).chain([0, n - 1]) {
+            assert_eq!(t.cell(i, 0), i.to_string());
+            assert_eq!(t.cell(i, 1), "x".repeat(i % 7));
+            assert_eq!(t.cell(i, 2), "");
+            assert_eq!(t.cell(i, 3), format!("end{i}"));
+        }
+    }
+
+    #[test]
+    fn stores_unescaped_text_for_quoted_cells() {
+        let t = parse(b"a\n\"say \"\"hi\"\", ok\"\n");
+        assert_eq!(t.cell(0, 0), "say \"hi\", ok");
     }
 }
