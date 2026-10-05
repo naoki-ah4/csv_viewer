@@ -20,7 +20,10 @@ use std::path::PathBuf;
 
 use gpui::{App, Application, Menu, MenuItem};
 
-use actions::{CloseWindow, FindInTable, GotoRow, OpenFile, Quit, ToggleNumbers, app_key_bindings};
+use actions::{
+    CloseWindow, FindInTable, GotoRow, OpenFile, Quit, ToggleColumnNumbers, ToggleRowNumbers,
+    app_key_bindings,
+};
 
 fn main() {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
@@ -84,10 +87,10 @@ fn setup_app(cx: &mut App) {
         },
         Menu {
             name: "View".into(),
-            items: vec![MenuItem::action(
-                "Show/Hide Row & Column Numbers",
-                ToggleNumbers,
-            )],
+            items: vec![
+                MenuItem::action("Show/Hide Row Numbers", ToggleRowNumbers),
+                MenuItem::action("Show/Hide Column Numbers", ToggleColumnNumbers),
+            ],
         },
     ]);
     cx.on_window_closed(|cx| {

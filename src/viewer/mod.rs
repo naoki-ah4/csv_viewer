@@ -169,22 +169,28 @@ impl Loaded {
 }
 
 /// 表示の設定。すべてのウィンドウで共通。
+#[derive(Clone, Copy)]
 pub(crate) struct ViewSettings {
-    /// 行番号の欄と、列番号の行を出すか。
-    pub(crate) show_numbers: bool,
+    /// 左端の行番号の欄を出すか。
+    pub(crate) show_row_numbers: bool,
+    /// 上端の列番号の行を出すか。
+    pub(crate) show_col_numbers: bool,
 }
 
 impl gpui::Global for ViewSettings {}
 
 impl Default for ViewSettings {
     fn default() -> Self {
-        Self { show_numbers: true }
+        Self {
+            show_row_numbers: true,
+            show_col_numbers: true,
+        }
     }
 }
 
 pub(crate) struct Viewer {
-    /// 行番号・列番号を出すか。描画のたびに、`ViewSettings` から写す。
-    show_numbers: bool,
+    /// 表示の設定。描画のたびに、全ウィンドウ共通の `ViewSettings` から写す。
+    settings: ViewSettings,
     loaded: Option<Loaded>,
     /// 直近の読み込み失敗など、ステータスバーに出すメッセージ。
     error: Option<String>,
@@ -244,7 +250,7 @@ pub(crate) struct Viewer {
 impl Viewer {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            show_numbers: true,
+            settings: ViewSettings::default(),
             loaded: None,
             error: None,
             loading: None,
@@ -286,7 +292,7 @@ impl Viewer {
 
     /// 行番号の欄の幅。行数の桁数で決まる。
     fn gutter_width(&self) -> f32 {
-        if self.show_numbers {
+        if self.settings.show_row_numbers {
             gutter_width(self.row_count())
         } else {
             0.0
@@ -295,7 +301,7 @@ impl Viewer {
 
     /// 縦スクロールしない部分（列番号の行とヘッダー行）の高さ。
     fn header_height(&self) -> f32 {
-        if self.show_numbers {
+        if self.settings.show_col_numbers {
             COLNO_HEIGHT + ROW_HEIGHT
         } else {
             ROW_HEIGHT
@@ -303,13 +309,10 @@ impl Viewer {
     }
 
     /// 行番号・列番号の表示を切り替える。設定は全ウィンドウで共通なので、全部を描き直す。
-    fn toggle_numbers(&mut self, cx: &mut Context<Self>) {
-        let settings = cx
-            .try_global::<ViewSettings>()
-            .map_or(true, |s| s.show_numbers);
-        cx.set_global(ViewSettings {
-            show_numbers: !settings,
-        });
+    fn toggle_numbers(&mut self, change: impl FnOnce(&mut ViewSettings), cx: &mut Context<Self>) {
+        let mut settings = cx.try_global::<ViewSettings>().copied().unwrap_or_default();
+        change(&mut settings);
+        cx.set_global(settings);
         cx.refresh_windows();
     }
 

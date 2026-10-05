@@ -65,7 +65,11 @@ impl Viewer {
             }));
         let total_width: f32 = loaded.col_widths.iter().sum();
         let row_count = loaded.table.row_count();
-        let show_numbers = self.show_numbers;
+        let ViewSettings {
+            show_row_numbers,
+            show_col_numbers,
+        } = self.settings;
+        let header_height = self.header_height();
         let gutter_width = self.gutter_width();
 
         // 縦は自前で仮想スクロールする。全体の座標（数億px）は使わず、見えている先頭行の番号と、
@@ -136,7 +140,7 @@ impl Viewer {
             .child(
                 div()
                     .w(px(gutter_width))
-                    .h(px(COLNO_HEIGHT + ROW_HEIGHT))
+                    .h(px(header_height))
                     .flex_shrink_0()
                     .bg(rgb(0xe8e8e8))
                     .border_b_1()
@@ -181,7 +185,7 @@ impl Viewer {
             .h_full()
             .min_w(px(total_width))
             .w_full()
-            .when(show_numbers, |d| d.child(colno))
+            .when(show_col_numbers, |d| d.child(colno))
             .child(header)
             .child(list);
 
@@ -221,7 +225,7 @@ impl Viewer {
                     cx.notify();
                 }
             }))
-            .when(show_numbers, |d| d.child(gutter))
+            .when(show_row_numbers, |d| d.child(gutter))
             .child(div().flex_1().min_w_0().h_full().child(h_scroll_area))
             .children(vbar)
             .children(hbar)
@@ -289,9 +293,7 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.show_numbers = cx
-            .try_global::<ViewSettings>()
-            .map_or(true, |s| s.show_numbers);
+        self.settings = cx.try_global::<ViewSettings>().copied().unwrap_or_default();
         let body = if self.loaded.is_some() {
             self.render_table(window, cx).into_any_element()
         } else if self.loading.is_some() {
@@ -379,7 +381,12 @@ impl Render for Viewer {
                 }),
             )
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(cx.listener(|this, _: &ToggleNumbers, _, cx| this.toggle_numbers(cx)))
+            .on_action(cx.listener(|this, _: &ToggleRowNumbers, _, cx| {
+                this.toggle_numbers(|s| s.show_row_numbers = !s.show_row_numbers, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleColumnNumbers, _, cx| {
+                this.toggle_numbers(|s| s.show_col_numbers = !s.show_col_numbers, cx)
+            }))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
             .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| {
                 this.move_or_scroll(Step::Up, Nav::LineUp, cx)
