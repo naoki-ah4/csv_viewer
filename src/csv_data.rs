@@ -28,10 +28,13 @@ pub struct CsvTable {
 }
 
 impl CsvTable {
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        Self::from_bytes(&std::fs::read(path)?)
+    /// `forced` を指定すると、文字コードの自動判定をせずその文字コードで読む。
+    pub fn load_as(path: &Path, forced: Option<&'static Encoding>) -> anyhow::Result<Self> {
+        Self::from_bytes_as(&std::fs::read(path)?, forced)
     }
 
+    /// 自動判定で読む。テストとベンチから使う（アプリ本体は `load_as` を使う）。
+    #[allow(dead_code)]
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
         Self::from_bytes_as(bytes, None)
     }

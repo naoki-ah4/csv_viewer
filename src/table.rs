@@ -37,13 +37,19 @@ pub enum Table {
 impl Table {
     /// ファイルサイズで読み込み方式を選んで開く。
     /// 遅延読み込みの場合は、索引を作る `IndexJob` も返す。呼び出し側がバックグラウンドで走らせる。
-    pub fn open(path: &Path) -> anyhow::Result<(Self, Option<IndexJob>)> {
-        Self::open_with_threshold(path, lazy_threshold())
+    ///
+    /// `forced` を指定すると、文字コードの自動判定をせずその文字コードで読む（手動切り替え用）。
+    pub fn open(
+        path: &Path,
+        forced: Option<&'static Encoding>,
+    ) -> anyhow::Result<(Self, Option<IndexJob>)> {
+        Self::open_with_threshold(path, lazy_threshold(), forced)
     }
 
     fn open_with_threshold(
         path: &Path,
         threshold: u64,
+        forced: Option<&'static Encoding>,
     ) -> anyhow::Result<(Self, Option<IndexJob>)> {
         let size = std::fs::metadata(path)?.len();
         if size > 0 && size >= threshold {
@@ -51,15 +57,15 @@ impl Table {
             // SAFETY: 開いている間に他のプロセスがファイルを切り詰めると、読み出し時に
             // SIGBUS になり得る。CSV ビューアでは、その場合のクラッシュを許容する。
             let mmap = unsafe { Mmap::map(&file)? };
-            let (table, job) = LazyTable::open(Arc::new(mmap), None);
+            let (table, job) = LazyTable::open(Arc::new(mmap), forced);
             return Ok((Self::Lazy(table), Some(job)));
         }
-        Ok((Self::load_eager(path)?, None))
+        Ok((Self::load_eager(path, forced)?, None))
     }
 
     /// サイズに関わらず、全体を読み込んで開く。
-    pub fn load_eager(path: &Path) -> anyhow::Result<Self> {
-        Ok(Self::Eager(CsvTable::load(path)?))
+    pub fn load_eager(path: &Path, forced: Option<&'static Encoding>) -> anyhow::Result<Self> {
+        Ok(Self::Eager(CsvTable::load_as(path, forced)?))
     }
 
     pub fn encoding(&self) -> &'static Encoding {
@@ -168,20 +174,20 @@ mod tests {
 
         for name in ["utf8", "sjis", "wide"] {
             let path = std::path::PathBuf::from(format!("samples/{name}.csv"));
-            let (lazy, job) = Table::open_with_threshold(&path, 1).unwrap();
+            let (lazy, job) = Table::open_with_threshold(&path, 1, None).unwrap();
             assert!(matches!(lazy, Table::Lazy(_)), "{name}");
             job.expect("a lazy table needs an index job")
                 .run(&AtomicBool::new(false));
             assert_eq!(lazy.index_status(), Some(IndexStatus::Done), "{name}");
             assert_eq!(lazy.indexing_percent(), None, "{name}");
-            same_cells(&lazy, &Table::load_eager(&path).unwrap());
+            same_cells(&lazy, &Table::load_eager(&path, None).unwrap());
         }
     }
 
     #[test]
     fn files_below_the_threshold_open_eagerly() {
         let path = std::path::Path::new("samples/utf8.csv");
-        let (table, job) = Table::open_with_threshold(path, u64::MAX).unwrap();
+        let (table, job) = Table::open_with_threshold(path, u64::MAX, None).unwrap();
         assert!(matches!(table, Table::Eager(_)));
         assert!(job.is_none());
         assert_eq!(table.index_status(), None);
@@ -190,7 +196,7 @@ mod tests {
     #[test]
     fn indexing_percent_reports_progress_and_clears_when_done() {
         let path = std::path::Path::new("samples/wide.csv");
-        let (table, job) = Table::open_with_threshold(path, 1).unwrap();
+        let (table, job) = Table::open_with_threshold(path, 1, None).unwrap();
         let mut job = job.unwrap();
         assert_eq!(table.indexing_percent(), Some(0));
         assert!(job.step(4096));
@@ -199,4 +205,31 @@ mod tests {
         while job.step(4096) {}
         assert_eq!(table.indexing_percent(), None);
     }
+
+    #[test]
+    fn a_forced_encoding_is_used_by_both_the_eager_and_the_lazy_path() {
+        use std::sync::atomic::AtomicBool;
+
+        let path = std::path::Path::new("samples/sjis.csv");
+        for threshold in [u64::MAX, 1] {
+            // 正しく指定すれば、自動判定と同じに読める。
+            let (right, job) =
+                Table::open_with_threshold(path, threshold, Some(encoding_rs::SHIFT_JIS)).unwrap();
+            if let Some(mut job) = job {
+                job.run(&AtomicBool::new(false));
+            }
+            assert_eq!(right.encoding(), encoding_rs::SHIFT_JIS, "threshold {threshold}");
+            assert_eq!(right.cell(0, 1), "山田太郎", "threshold {threshold}");
+
+            // 間違った文字コードを指定すると、その文字コードで読んで、文字化けになる。
+            let (wrong, job) =
+                Table::open_with_threshold(path, threshold, Some(encoding_rs::UTF_8)).unwrap();
+            if let Some(mut job) = job {
+                job.run(&AtomicBool::new(false));
+            }
+            assert_eq!(wrong.encoding(), encoding_rs::UTF_8, "threshold {threshold}");
+            assert_ne!(wrong.cell(0, 1), "山田太郎", "threshold {threshold}");
+        }
+    }
 }
+

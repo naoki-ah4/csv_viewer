@@ -1,5 +1,6 @@
 mod cell_popup;
 mod csv_data;
+mod encodings;
 mod goto;
 mod lazy_table;
 mod record_index;
@@ -44,6 +45,8 @@ actions!(
 );
 
 const ROW_HEIGHT: f32 = 24.0;
+const MENU_WIDTH: f32 = 200.0;
+const MENU_ITEM_HEIGHT: f32 = 26.0;
 /// ポップアップを出しているセルの背景色。
 const SELECTED_CELL_BG: Rgba = Rgba {
     r: 0.81,
@@ -137,6 +140,12 @@ struct Viewer {
     goto: Option<GotoInput>,
     /// クリックしたセルの全文を出すポップアップ。
     popup: Option<CellPopup>,
+    /// 文字コードの切り替えメニュー。開いているあいだ、クリックした位置を持つ。
+    encoding_menu: Option<Point<Pixels>>,
+    /// いま開いているファイルのパス。文字コードを変えて開き直すときに使う。
+    path: Option<PathBuf>,
+    /// 手動で指定した文字コード。`None` は自動判定。
+    forced_encoding: Option<&'static encoding_rs::Encoding>,
     /// ステータスバーに出す通知（範囲外の行への移動など）。次の操作で消える。
     notice: Option<String>,
     /// 実行中の読み込み。保持している間だけ動き、drop するとキャンセルされる。
@@ -165,6 +174,9 @@ impl Viewer {
             loading: None,
             goto: None,
             popup: None,
+            encoding_menu: None,
+            path: None,
+            forced_encoding: None,
             notice: None,
             load_task: None,
             index_task: None,
@@ -181,14 +193,17 @@ impl Viewer {
     /// CSVをバックグラウンドで読み込み、終わったら表示を差し替える。
     /// 読み込み中は直前の表示を残す。別のファイルを開くと、前の読み込みは破棄される。
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_with(path, false, window, cx);
+        // 新しいファイルは、自動判定で開く。
+        self.open_with(path, false, None, window, cx);
     }
 
     /// `force_eager` なら、サイズに関わらず全体を読み込んで開く。
+    /// `forced` を指定すると、文字コードの自動判定をせずその文字コードで読む。
     fn open_with(
         &mut self,
         path: PathBuf,
         force_eager: bool,
+        forced: Option<&'static encoding_rs::Encoding>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -200,9 +215,9 @@ impl Viewer {
             let path = path.clone();
             async move {
                 let (table, job) = if force_eager {
-                    (Table::load_eager(&path)?, None)
+                    (Table::load_eager(&path, forced)?, None)
                 } else {
-                    Table::open(&path)?
+                    Table::open(&path, forced)?
                 };
                 anyhow::Ok((Loaded::new(table), job))
             }
@@ -211,7 +226,7 @@ impl Viewer {
         self.load_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = load.await;
             this.update_in(cx, |this, window, cx| {
-                this.finish_load(&path, result, window, cx)
+                this.finish_load(&path, forced, result, window, cx)
             })
             .ok();
         }));
@@ -222,6 +237,7 @@ impl Viewer {
     fn finish_load(
         &mut self,
         path: &Path,
+        forced: Option<&'static encoding_rs::Encoding>,
         result: anyhow::Result<(Loaded, Option<IndexJob>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -232,7 +248,10 @@ impl Viewer {
                 self.stop_indexing();
                 self.goto = None;
                 self.popup = None;
+                self.encoding_menu = None;
                 self.notice = None;
+                self.path = Some(path.to_path_buf());
+                self.forced_encoding = forced;
                 self.loaded = Some(loaded);
                 self.scroll = ScrollPos::TOP;
                 self.h_scroll.set_offset(point(px(0.), px(0.)));
@@ -327,7 +346,7 @@ impl Viewer {
             cx.notify();
             return;
         }
-        self.open_with(path.to_path_buf(), true, window, cx);
+        self.open_with(path.to_path_buf(), true, self.forced_encoding, window, cx);
     }
 
     fn prompt_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -366,6 +385,30 @@ impl Viewer {
         self.scroll = self
             .scroll
             .navigated(nav, self.max_scroll(), viewport_height);
+        cx.notify();
+    }
+
+    /// 文字コードを `forced` に変えて、同じファイルを開き直す。`None` は自動判定に戻す。
+    fn reopen_with_encoding(
+        &mut self,
+        forced: Option<&'static encoding_rs::Encoding>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.encoding_menu = None;
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        self.open_with(path, false, forced, window, cx);
+    }
+
+    /// 文字コードの切り替えメニューを開く。開いているときは閉じる。
+    fn toggle_encoding_menu(&mut self, anchor: Point<Pixels>, cx: &mut Context<Self>) {
+        self.popup = None;
+        self.encoding_menu = match self.encoding_menu {
+            Some(_) => None,
+            None => Some(anchor),
+        };
         cx.notify();
     }
 
@@ -426,8 +469,11 @@ impl Viewer {
     /// 入力欄が開いているときのキー入力を処理する。
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(input) = self.goto.as_mut() else {
-            if self.popup.is_some() && event.keystroke.key == "escape" {
+            if (self.popup.is_some() || self.encoding_menu.is_some())
+                && event.keystroke.key == "escape"
+            {
                 self.popup = None;
+                self.encoding_menu = None;
                 cx.stop_propagation();
                 cx.notify();
             }
@@ -863,38 +909,110 @@ impl Viewer {
         )
     }
 
-    fn render_status(&self) -> impl IntoElement {
-        let text = match (&self.error, &self.loading, &self.loaded) {
-            (Some(error), _, _) => error.clone(),
-            (None, Some(name), _) => format!("読み込み中… {name}"),
-            (None, None, Some(_)) if self.notice.is_some() => {
-                self.notice.clone().unwrap_or_default()
-            }
-            (None, None, Some(l)) => {
-                let percent = l.table.indexing_percent();
-                let mut text = format!(
-                    "{}{} 行 / {} 列 / {}",
-                    l.table.row_count(),
-                    if percent.is_some() { "+" } else { "" },
-                    l.table.column_count(),
-                    l.table.encoding().name()
-                );
-                if let Some(percent) = percent {
-                    text.push_str(&format!(" / 索引作成中 {percent}%"));
-                }
-                text
-            }
-            (None, None, None) => String::new(),
-        };
-        div()
+    /// 文字コードの切り替えメニュー。ステータスバーの文字コード表示をクリックすると、真上に出る。
+    fn render_encoding_menu(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let anchor = self.encoding_menu?;
+        let choices = encodings::choices();
+        let height = choices.len() as f32 * MENU_ITEM_HEIGHT + 10.0;
+        let window_size = window.viewport_size();
+        let (x, y) = cell_popup::place_above(
+            (f32::from(anchor.x), f32::from(anchor.y)),
+            (f32::from(window_size.width), f32::from(window_size.height)),
+            (MENU_WIDTH, height),
+        );
+        let forced = self.forced_encoding;
+        Some(
+            div()
+                .id("encoding-menu")
+                // 背後の表がマウスやホイールを受け取らないようにする。
+                .occlude()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(MENU_WIDTH))
+                .flex()
+                .flex_col()
+                .py_1()
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(rgb(0xaaaaaa))
+                .rounded_md()
+                .shadow_lg()
+                .children(choices.into_iter().enumerate().map(|(i, choice)| {
+                    let active = encodings::is_active(&choice, forced);
+                    let target = choice.encoding;
+                    div()
+                        .id(("encoding-choice", i))
+                        .h(px(MENU_ITEM_HEIGHT))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(0xe8f0fe)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.reopen_with_encoding(target, window, cx);
+                            }),
+                        )
+                        .child(format!("{} {}", if active { "✓" } else { "  " }, choice.label))
+                })),
+        )
+    }
+
+    fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
             .h(px(ROW_HEIGHT))
             .px_2()
             .bg(rgb(0xf0f0f0))
             .border_t_1()
             .border_color(rgb(0xcccccc))
-            .text_sm()
-            .when(self.error.is_some(), |d| d.text_color(rgb(0xb00020)))
-            .child(text)
+            .text_sm();
+        match (&self.error, &self.loading, &self.loaded) {
+            (Some(error), _, _) => bar.text_color(rgb(0xb00020)).child(error.clone()),
+            (None, Some(name), _) => bar.child(format!("読み込み中… {name}")),
+            (None, None, Some(_)) if self.notice.is_some() => {
+                bar.child(self.notice.clone().unwrap_or_default())
+            }
+            (None, None, Some(l)) => {
+                let percent = l.table.indexing_percent();
+                let head = format!(
+                    "{}{} 行 / {} 列 / ",
+                    l.table.row_count(),
+                    if percent.is_some() { "+" } else { "" },
+                    l.table.column_count(),
+                );
+                let label = encodings::status_label(l.table.encoding(), self.forced_encoding);
+                bar.child(head)
+                    .child(
+                        div()
+                            .id("encoding-label")
+                            .px_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(0xdcdcdc)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                    // 全体のクリックで閉じる処理（ルート要素）には、渡さない。
+                                    cx.stop_propagation();
+                                    this.toggle_encoding_menu(event.position, cx);
+                                }),
+                            )
+                            .child(label),
+                    )
+                    .children(percent.map(|p| format!(" / 索引作成中 {p}%")))
+            }
+            (None, None, None) => bar,
+        }
     }
 }
 
@@ -1010,7 +1128,9 @@ impl Render for Viewer {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.popup.take().is_some() {
+                    let closed_popup = this.popup.take().is_some();
+                    let closed_menu = this.encoding_menu.take().is_some();
+                    if closed_popup || closed_menu {
                         cx.notify();
                     }
                 }),
@@ -1049,9 +1169,10 @@ impl Render for Viewer {
                 }),
             )
             .child(body)
-            .child(self.render_status())
+            .child(self.render_status(cx))
             .children(self.render_goto())
             .children(self.render_popup(window))
+            .children(self.render_encoding_menu(window, cx))
     }
 }
 
