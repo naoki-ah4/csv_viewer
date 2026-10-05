@@ -1276,9 +1276,11 @@ dependencies = [
  "chardetng",
  "csv",
  "encoding_rs",
+ "futures",
  "gpui",
  "memchr",
  "memmap2",
+ "url",
 ]
 
 [[package]]
