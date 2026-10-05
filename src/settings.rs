@@ -1,13 +1,14 @@
 //! 表示の設定と、その保存・読み込み。
 //!
-//! 設定は `~/Library/Application Support/<識別子>/settings.toml` に、`キー = true/false` の
-//! 行で書く。ファイルがない・読めない・壊れているときは、既定値で動く（落ちない）。
+//! 設定は `~/Library/Application Support/<識別子>/settings.jsonc` に、JSON で書く。
+//! コメントと末尾のカンマは書いてよい（ただし、アプリが保存するときは、コメントなしで書き直す）。
+//! ファイルがない・読めない・壊れているときは、既定値で動く（落ちない）。
 //! 識別子は、`scripts/bundle.sh` の `BUNDLE_ID` と同じにすること。
 
 use std::path::{Path, PathBuf};
 
 pub(crate) const APP_ID: &str = "net.naoki-workspace.csv-viewer";
-const FILE_NAME: &str = "settings.toml";
+const FILE_NAME: &str = "settings.jsonc";
 
 /// 表示の設定。すべてのウィンドウで共通。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,31 +31,34 @@ impl Default for ViewSettings {
 }
 
 impl ViewSettings {
-    /// 設定ファイルの中身を読む。知らないキーや読めない行は、無視する（新旧の版が混ざっても動くように）。
+    /// 設定ファイルの中身を読む。キーごとに読み、知らないキーや型の違う値は、無視する
+    /// （新旧の版が混ざっても、手で書き間違えても、他のキーは生きるように）。
     pub(crate) fn parse(text: &str) -> Self {
         let mut settings = Self::default();
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("");
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let Ok(value) = value.trim().parse::<bool>() else {
-                continue;
-            };
-            match key.trim() {
-                "show_row_numbers" => settings.show_row_numbers = value,
-                "show_col_numbers" => settings.show_col_numbers = value,
-                _ => {}
-            }
+        let Ok(value) = jsonc_parser::parse_to_serde_value::<serde_json::Value>(
+            text,
+            &jsonc_parser::ParseOptions::default(),
+        ) else {
+            return settings;
+        };
+        let flag = |key: &str| value.get(key).and_then(serde_json::Value::as_bool);
+        if let Some(v) = flag("show_row_numbers") {
+            settings.show_row_numbers = v;
+        }
+        if let Some(v) = flag("show_col_numbers") {
+            settings.show_col_numbers = v;
         }
         settings
     }
 
     pub(crate) fn serialize(&self) -> String {
-        format!(
-            "show_row_numbers = {}\nshow_col_numbers = {}\n",
-            self.show_row_numbers, self.show_col_numbers
-        )
+        let value = serde_json::json!({
+            "show_row_numbers": self.show_row_numbers,
+            "show_col_numbers": self.show_col_numbers,
+        });
+        let mut text = serde_json::to_string_pretty(&value).unwrap_or_default();
+        text.push('\n');
+        text
     }
 
     /// 既定の場所から読む。
@@ -80,7 +84,7 @@ impl ViewSettings {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("toml.tmp");
+        let tmp = path.with_extension("jsonc.tmp");
         std::fs::write(&tmp, self.serialize())?;
         std::fs::rename(&tmp, path)
     }
@@ -121,8 +125,21 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_comments_and_garbage_are_ignored() {
-        let text = "# memo\nfuture_option = 3\nshow_row_numbers = false # 行番号は不要\nnonsense\nshow_col_numbers = maybe\n";
+    fn comments_and_trailing_commas_are_accepted() {
+        let text = "// memo\n{\n  /* 行番号は不要 */\n  \"show_row_numbers\": false,\n  \"show_col_numbers\": true,\n}\n";
+        assert_eq!(
+            ViewSettings::parse(text),
+            ViewSettings {
+                show_row_numbers: false,
+                show_col_numbers: true
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_keys_and_wrong_types_are_ignored_per_key() {
+        let text =
+            r#"{"future_option": 3, "show_row_numbers": false, "show_col_numbers": "maybe"}"#;
         assert_eq!(
             ViewSettings::parse(text),
             ViewSettings {
@@ -134,9 +151,14 @@ mod tests {
     }
 
     #[test]
-    fn spacing_around_the_equals_sign_does_not_matter() {
-        assert!(!ViewSettings::parse("show_col_numbers=false").show_col_numbers);
-        assert!(!ViewSettings::parse("  show_col_numbers  =  false  ").show_col_numbers);
+    fn broken_or_unexpected_files_fall_back_to_the_defaults() {
+        for text in ["", "   ", "{", "nonsense", "[1, 2]", "42", "null"] {
+            assert_eq!(
+                ViewSettings::parse(text),
+                ViewSettings::default(),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
@@ -157,7 +179,7 @@ mod tests {
             ViewSettings::parse(&std::fs::read_to_string(&path).unwrap()),
             ViewSettings::default()
         );
-        assert!(!path.with_extension("toml.tmp").exists());
+        assert!(!path.with_extension("jsonc.tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
