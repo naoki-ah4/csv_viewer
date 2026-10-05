@@ -1,4 +1,5 @@
 mod csv_data;
+mod goto;
 mod lazy_table;
 mod record_index;
 mod scroll_pos;
@@ -13,13 +14,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, Menu, MenuItem,
+    App, Application, Bounds, Context, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
     ScrollWheelEvent, Task, Window, WindowBounds, WindowOptions, actions, canvas, div, point,
     prelude::*, px, rgb, rgba, size,
 };
 
 use lazy_table::{IndexJob, IndexStatus};
+use goto::{GotoInput, GotoKey};
 use scroll_pos::{Nav, ScrollPos};
 use scrollbar::{Axis, AxisState};
 use table::Table;
@@ -30,6 +32,7 @@ actions!(
         Quit,
         CloseWindow,
         OpenFile,
+        GotoRow,
         ScrollLineUp,
         ScrollLineDown,
         ScrollPageUp,
@@ -109,6 +112,10 @@ struct Viewer {
     error: Option<String>,
     /// 読み込み中のファイル名。
     loading: Option<String>,
+    /// 「行へ移動」の入力欄。開いているあいだだけ `Some`。
+    goto: Option<GotoInput>,
+    /// ステータスバーに出す通知（範囲外の行への移動など）。次の操作で消える。
+    notice: Option<String>,
     /// 実行中の読み込み。保持している間だけ動き、drop するとキャンセルされる。
     load_task: Option<Task<()>>,
     /// 遅延読み込みの索引作成。`cancel` を立てると、次のチャンクの前で止まる。
@@ -133,6 +140,8 @@ impl Viewer {
             loaded: None,
             error: None,
             loading: None,
+            goto: None,
+            notice: None,
             load_task: None,
             index_task: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -161,6 +170,7 @@ impl Viewer {
     ) {
         self.loading = Some(file_name(&path));
         self.error = None;
+        self.notice = None;
 
         let load = cx.background_spawn({
             let path = path.clone();
@@ -196,6 +206,8 @@ impl Viewer {
         match result {
             Ok((loaded, job)) => {
                 self.stop_indexing();
+                self.goto = None;
+                self.notice = None;
                 self.loaded = Some(loaded);
                 self.scroll = ScrollPos::TOP;
                 self.h_scroll.set_offset(point(px(0.), px(0.)));
@@ -323,11 +335,61 @@ impl Viewer {
     }
 
     fn navigate(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        self.notice = None;
         let viewport_height = f32::from(self.viewport.get().size.height);
         self.scroll = self
             .scroll
             .navigated(nav, self.max_scroll(), viewport_height);
         cx.notify();
+    }
+
+    /// 「行へ移動」の入力欄を開く。表が読み込まれていないときは何もしない。
+    fn open_goto(&mut self, cx: &mut Context<Self>) {
+        if self.loaded.is_some() {
+            self.goto = Some(GotoInput::default());
+            cx.notify();
+        }
+    }
+
+    /// 入力欄が開いているときのキー入力を処理する。
+    fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(input) = self.goto.as_mut() else {
+            return;
+        };
+        let keystroke = &event.keystroke;
+        let modifiers = &keystroke.modifiers;
+        let has_command_modifier =
+            modifiers.control || modifiers.alt || modifiers.platform || modifiers.function;
+        match goto::classify(&keystroke.key, keystroke.key_char.as_deref(), has_command_modifier) {
+            GotoKey::Digit(digit) => input.push_digit(digit),
+            GotoKey::Backspace => input.backspace(),
+            GotoKey::Escape => self.goto = None,
+            GotoKey::Enter => {
+                let value = input.value();
+                self.goto = None;
+                if let Some(value) = value {
+                    self.jump_to_row(value);
+                }
+            }
+            GotoKey::Ignore => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// データ行 `number`（1始まり）へ移動する。範囲外なら、行ける所まで行って理由を知らせる。
+    fn jump_to_row(&mut self, number: u64) {
+        let Some(loaded) = self.loaded.as_ref() else {
+            return;
+        };
+        let indexing = loaded.table.indexing_percent().is_some();
+        let resolved = goto::resolve(number, loaded.table.row_count(), indexing);
+        self.scroll = ScrollPos {
+            row: resolved.row,
+            offset: 0.0,
+        }
+        .clamped(self.max_scroll());
+        self.notice = resolved.notice;
     }
 
     /// 縦に動かせる上限（最後の行が領域の下端に揃う位置）。
@@ -595,6 +657,7 @@ impl Viewer {
                 let dy = f64::from(f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y));
                 if dy != 0.0 {
                     // 下へ送る向き（delta.y が負）で、位置が増える。
+                    this.notice = None;
                     this.scroll = this.scroll.scrolled_by(-dy).clamped(this.max_scroll());
                     cx.notify();
                 }
@@ -605,10 +668,67 @@ impl Viewer {
             .children(hbar)
     }
 
+    /// 「行へ移動」の入力欄。表の上に重ねて出す。
+    fn render_goto(&self) -> Option<impl IntoElement> {
+        let input = self.goto.as_ref()?;
+        let indexing = self
+            .loaded
+            .as_ref()
+            .is_some_and(|l| l.table.indexing_percent().is_some());
+        let range = format!(
+            "1〜{}{}",
+            self.row_count(),
+            if indexing { "+" } else { "" }
+        );
+        Some(
+            div()
+                .absolute()
+                .top(px(HEADER_HEIGHT + 8.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(300.0))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xaaaaaa))
+                        .shadow_md()
+                        .child(format!("行へ移動（{range}）"))
+                        .child(
+                            div()
+                                .h(px(28.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(0x4a90d9))
+                                .child(format!("{}▏", input.text())),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x888888))
+                                .child("Enter で移動 / Esc でキャンセル"),
+                        ),
+                ),
+        )
+    }
+
     fn render_status(&self) -> impl IntoElement {
         let text = match (&self.error, &self.loading, &self.loaded) {
             (Some(error), _, _) => error.clone(),
             (None, Some(name), _) => format!("読み込み中… {name}"),
+            (None, None, Some(_)) if self.notice.is_some() => {
+                self.notice.clone().unwrap_or_default()
+            }
             (None, None, Some(l)) => {
                 let percent = l.table.indexing_percent();
                 let mut text = format!(
@@ -733,6 +853,7 @@ impl Render for Viewer {
         };
 
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -740,6 +861,10 @@ impl Render for Viewer {
             .text_color(rgb(0x222222))
             .text_sm()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                this.handle_key_down(event, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GotoRow, _, cx| this.open_goto(cx)))
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.prompt_open(window, cx)))
             .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| this.navigate(Nav::LineUp, cx)))
@@ -775,6 +900,7 @@ impl Render for Viewer {
             )
             .child(body)
             .child(self.render_status())
+            .children(self.render_goto())
     }
 }
 
@@ -815,6 +941,7 @@ fn setup_app(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-o", OpenFile, None),
+        KeyBinding::new("cmd-l", GotoRow, None),
         KeyBinding::new("up", ScrollLineUp, None),
         KeyBinding::new("down", ScrollLineDown, None),
         KeyBinding::new("pageup", ScrollPageUp, None),
@@ -833,6 +960,7 @@ fn setup_app(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open…", OpenFile),
+                MenuItem::action("Go to Row…", GotoRow),
                 MenuItem::action("Close Window", CloseWindow),
             ],
         },
